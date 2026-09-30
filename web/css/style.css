@@ -13,8 +13,8 @@
   --blue: #5aa9ff;
   --card-w: 86px;
   --card-h: calc(var(--card-w) * 1.395);
-  --land-w: 68px;
-  --hand-w: 104px;
+  --land-w: 60px;
+  --hand-w: 96px;
   --radius: 6px;
   color-scheme: dark;
 }
@@ -147,8 +147,9 @@ table.games td.actions .btn { margin-left: 4px; }
 .log-action { margin: 4px 0; padding: 4px 6px; background: #1f2a36; border-radius: 4px; }
 .log-comment { color: #9fc6ff; font-style: italic; margin-top: 2px; }
 
-.side { flex: 1 1 0; display: flex; flex-direction: column; justify-content: flex-start; padding: 6px 12px; min-height: 0; gap: 4px; }
-.side.bottom { justify-content: flex-end; }
+.side { flex: 1 1 0; display: flex; flex-direction: column; justify-content: flex-start; padding: 6px 12px; min-height: 0; gap: 4px; overflow-y: auto; overflow-x: hidden; }
+.side > * { flex-shrink: 0; }
+.side.bottom > :first-child { margin-top: auto; }
 .info-hand { display: flex; align-items: flex-end; gap: 16px; min-height: 64px; }
 .side.top .info-hand { align-items: flex-start; }
 .zone-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: calc(var(--card-h) * .55); padding: 2px 0; }

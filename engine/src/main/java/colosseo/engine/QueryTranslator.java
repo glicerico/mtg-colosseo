@@ -502,7 +502,7 @@ final class QueryTranslator {
         String[][] types = {{"W", "WHITE"}, {"U", "BLUE"}, {"B", "BLACK"}, {"R", "RED"}, {"G", "GREEN"}, {"C", "COLORLESS"}};
         for (String[] t : types) {
             int n = pool.get(ManaType.valueOf(t[1]));
-            if (n > 0) {
+            if (n > 0 && poolManaHelps(player.manualUnpaid(), t[0])) {
                 JsonObject o = d.addOption("pool:" + t[0], "Use {" + t[0] + "} from mana pool (" + n + ")");
                 o.addProperty("kind", "pool");
             }
@@ -548,6 +548,33 @@ final class QueryTranslator {
             }
         };
         return d;
+    }
+
+    /**
+     * Whether mana of a pool type can pay part of the unpaid cost (offering useless pool mana makes agents loop).
+     */
+    private static boolean poolManaHelps(mage.abilities.costs.mana.ManaCost unpaid, String type) {
+        if (unpaid == null) {
+            return true;
+        }
+        mage.Mana m = unpaid.getMana();
+        if (m.getGeneric() > 0 || unpaid.getText().contains("/")) {
+            return true;
+        }
+        switch (type) {
+            case "W":
+                return m.getWhite() > 0;
+            case "U":
+                return m.getBlue() > 0;
+            case "B":
+                return m.getBlack() > 0;
+            case "R":
+                return m.getRed() > 0;
+            case "G":
+                return m.getGreen() > 0;
+            default:
+                return m.getColorless() > 0;
+        }
     }
 
     private static Decision select(GameSession session, BridgePlayer player, PlayerQueryEvent e) {

@@ -316,7 +316,7 @@ public final class StateView {
             }
             String rule = so instanceof StackAbility ? ((StackAbility) so).getRule() : so.getStackAbility().getRule();
             JsonArray rules = new JsonArray();
-            rules.add(Json.plain(rule));
+            rules.add(Json.plain(rule).replace("{this}", sourceName));
             s.add("rules", rules);
             s.add("targets", Json.ids(targetsOf(so.getStackAbility())));
         }

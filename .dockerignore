@@ -1,0 +1,6 @@
+.git
+.xmage
+data
+engine/target
+python
+**/__pycache__

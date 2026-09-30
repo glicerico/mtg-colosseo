@@ -67,7 +67,9 @@ public final class GameSession {
     private volatile String status = "created";
     private volatile JsonObject result;
     private volatile String error;
-    private Game game;
+    private volatile Game game;
+    private volatile int finalTurn;
+    private volatile JsonObject finalState;
     private Thread thread;
     private final long createdAt = System.currentTimeMillis();
     private volatile long startedAt;
@@ -244,15 +246,36 @@ public final class GameSession {
         }
         JsonObject specMsg = msg.deepCopy();
         try {
-            if (game != null && !spectators.isEmpty()) {
-                specMsg.add("state", StateView.build(game, null, true, seatIndex));
+            if (game != null) {
+                // kept for viewers of finished games (the XMage game itself is released below)
+                finalState = StateView.build(game, null, true, seatIndex);
+                specMsg.add("state", finalState);
             }
         } catch (RuntimeException e) {
             LOG.debug("final state failed", e);
         }
         broadcastSpectators(specMsg);
         responder.shutdown();
+        releaseGame();
         manager.onFinished(this);
+    }
+
+    /**
+     * Drops references to the XMage game and players: finished sessions stay listed but must not hold
+     * megabytes of game state each.
+     */
+    private void releaseGame() {
+        if (game != null) {
+            finalTurn = game.getTurnNum();
+        }
+        game = null;
+        for (Seat seat : seats) {
+            seat.player = null;
+        }
+        seatByPlayer.clear();
+        lastSeatState.clear();
+        lastSpectatorState = null;
+        lastSpectatorStateRevealed = null;
     }
 
     /**
@@ -414,6 +437,19 @@ public final class GameSession {
             responder.execute(() -> d.responder.apply(queued));
             return;
         }
+        // loop guard: an agent that keeps answering a payment prompt without progress gets cancelled
+        String repeatKey = d.kind + "|" + d.prompt + "|" + d.options.keySet();
+        if (Decision.MANA.equals(d.kind) && repeatKey.equals(seat.lastDecisionKey) && ++seat.repeatCount >= 25) {
+            seat.repeatCount = 0;
+            addLog(seat.config().name + ": payment made no progress, cancelled");
+            JsonObject cancel = Decision.choiceAction("cancel");
+            responder.execute(() -> d.responder.apply(cancel));
+            return;
+        }
+        if (!repeatKey.equals(seat.lastDecisionKey)) {
+            seat.lastDecisionKey = repeatKey;
+            seat.repeatCount = 0;
+        }
         decisionCount.incrementAndGet();
         d.state = StateView.build(game, seat.playerId, false, seatIndex);
         d.newLog = seat.takeNewLog(log);
@@ -554,7 +590,7 @@ public final class GameSession {
         seat.connections.add(c);
         JsonObject hello = hello(seat.index);
         hello.addProperty("role", "player");
-        JsonObject state = lastSeatState.get(seat.index);
+        JsonObject state = finalState != null ? finalState : lastSeatState.get(seat.index);
         if (state == null) {
             state = tryBuildState(seat.playerId, false);
         }
@@ -580,7 +616,7 @@ public final class GameSession {
         spectators.add(c);
         JsonObject hello = hello(-1);
         hello.addProperty("role", "spectator");
-        JsonObject state = c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState;
+        JsonObject state = finalState != null ? finalState : (c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState);
         if (state == null) {
             state = tryBuildState(null, c.revealAll);
         }
@@ -662,7 +698,8 @@ public final class GameSession {
         o.addProperty("title", config.title);
         o.addProperty("status", status);
         o.addProperty("created_at", createdAt);
-        o.addProperty("turn", game == null ? 0 : game.getTurnNum());
+        Game g = game;
+        o.addProperty("turn", g == null ? finalTurn : g.getTurnNum());
         JsonArray arr = new JsonArray();
         for (Seat seat : seats) {
             JsonObject s = seat.config().toJson();
@@ -722,6 +759,7 @@ public final class GameSession {
             line.add("data", payload);
             recorder.write(Json.GSON.toJson(line));
             recorder.newLine();
+            recorder.flush();
         } catch (IOException e) {
             LOG.warn("record failed: " + e.getMessage());
         }

@@ -56,7 +56,9 @@ class RandomAgent(Agent):
             return d.default()
         if k == "pay_mana":
             sources = [o for o in d.options if o.get("kind") in ("source", "pool")]
-            return d.choose(rng.choice(sources)) if sources else d.choose("cancel")
+            if sources and rng.random() < 0.7:
+                return d.choose(rng.choice(sources))
+            return d.choose("cancel")
         if k == "target":
             selectable = [o for o in d.options if o.id != "done" and not o.get("selected")]
             if not selectable:

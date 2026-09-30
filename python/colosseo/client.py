@@ -111,7 +111,8 @@ class SeatConnection:
 
     def __init__(self, url: str, open_timeout: float = 30.0):
         self.url = url
-        self.ws = connect(url, max_size=None, open_timeout=open_timeout, close_timeout=2)
+        self._cm = connect(url, max_size=None, open_timeout=open_timeout, close_timeout=2)
+        self.ws = self._cm.__enter__()
 
     def send(self, message: Dict[str, Any]) -> None:
         self.ws.send(json.dumps(message))
@@ -134,7 +135,7 @@ class SeatConnection:
 
     def close(self) -> None:
         try:
-            self.ws.close()
+            self._cm.__exit__(None, None, None)
         except Exception:
             pass
 

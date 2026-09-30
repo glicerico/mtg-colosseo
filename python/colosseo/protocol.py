@@ -250,6 +250,14 @@ class Decision:
         payload = self.raw.get("default")
         if payload:
             return Action(payload)
+        if self.kind == "declare_attackers":
+            return self.attack([])
+        if self.kind == "declare_blockers":
+            return self.block([])
+        if self.kind == "amount":
+            return self.amount(self.raw.get("min", 0))
+        if self.kind == "multi_amount":
+            return self.amounts([it.get("default", it.get("min", 0)) for it in self.raw.get("items", [])])
         if self.options:
             return self.choose(self.options[0])
         return Action({"choice": "pass"})

@@ -48,7 +48,7 @@ public final class ColosseoServer {
     /**
      * Sets offered in the lobby for sealed play (every XMage set works via the API).
      */
-    public static final List<String> FEATURED_SETS = List.of("FDN", "DSK");
+    public static final List<String> FEATURED_SETS = List.of("FDN", "BLB");
 
     private final GameManager manager;
     private final boolean requireTokens;

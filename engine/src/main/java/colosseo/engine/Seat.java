@@ -37,6 +37,8 @@ public final class Seat {
 
     // game thread only
     private int logCursor = 0;
+    String lastDecisionKey;
+    int repeatCount;
 
     private volatile int passTurnNumber = -1;
     private volatile String info;

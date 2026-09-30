@@ -102,6 +102,10 @@ public class BridgePlayer extends HumanPlayer {
 
     private static final String WAKE = "colosseo";
 
+    // actions that failed to activate in the current game window (see legalActions)
+    private final transient Set<String> failedActions = new HashSet<>();
+    private transient String failedWindow;
+
     private transient Seat seat;
     private final transient Deque<QueryContext> contexts = new ArrayDeque<>();
     private transient volatile JsonObject lastAction;
@@ -294,8 +298,11 @@ public class BridgePlayer extends HumanPlayer {
             if (ability == null) {
                 continue;
             }
-            // activation may fail (e.g. no legal targets, cost not paid): XMage rolls the state back itself
-            activateAbility(ability.copy(), game);
+            // activation may fail (e.g. no legal targets, cost not paid): XMage rolls the state back itself.
+            // Hide a failed action until the game moves on, otherwise an agent can retry it forever.
+            if (!activateAbility(ability.copy(), game)) {
+                failedActions.add(choice);
+            }
             return true;
         }
         return false;
@@ -310,12 +317,20 @@ public class BridgePlayer extends HumanPlayer {
      * Legal non-mana actions for this priority, keyed by ability id.
      */
     public Map<String, ActivatedAbility> legalActions(Game game) {
+        String window = game.getTurnNum() + "|" + game.getTurnStepType() + "|" + game.getStack().size()
+                + "|" + game.getBattlefield().getAllPermanents().size() + "|" + getHand().size();
+        if (!window.equals(failedWindow)) {
+            failedWindow = window;
+            failedActions.clear();
+        }
         Map<String, ActivatedAbility> result = new LinkedHashMap<>();
         for (ActivatedAbility ability : getPlayable(game, true, Zone.ALL, false)) {
             if (ability.isManaActivatedAbility()) {
                 continue;
             }
-            result.putIfAbsent(ability.getId().toString(), ability);
+            if (!failedActions.contains(ability.getId().toString())) {
+                result.putIfAbsent(ability.getId().toString(), ability);
+            }
         }
         return result;
     }
@@ -659,6 +674,15 @@ public class BridgePlayer extends HumanPlayer {
     // mana payment
     // ------------------------------------------------------------------------------------------------
 
+    private transient ManaCost manualUnpaid;
+
+    /**
+     * The cost being paid manually (for the pay_mana decision), or null.
+     */
+    public ManaCost manualUnpaid() {
+        return manualUnpaid;
+    }
+
     // guards against auto-payment loops (mana produced but not usable for this cost)
     private transient String autoPayKey;
     private transient int autoPayAttempts;
@@ -685,7 +709,12 @@ public class BridgePlayer extends HumanPlayer {
             }
         }
         // manual payment: raises a PLAY_MANA query (sources to tap, pool mana, special, cancel)
-        return super.playMana(ability, unpaid, promptText, game);
+        manualUnpaid = unpaid;
+        try {
+            return super.playMana(ability, unpaid, promptText, game);
+        } finally {
+            manualUnpaid = null;
+        }
     }
 
     /**
