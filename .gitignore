@@ -1,0 +1,17 @@
+# build outputs
+engine/target/
+.xmage/
+# runtime data: card database, game records
+data/
+# python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+dist/
+build/
+# editors
+.idea/
+.vscode/
+*.iml
+.DS_Store
