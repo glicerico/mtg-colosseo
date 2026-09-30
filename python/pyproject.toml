@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colosseo"
+version = "0.1.0"
+description = "Python SDK for MTG Colosseo: write agents that play Magic: The Gathering against XMage's AI, other agents and humans"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.9"
+dependencies = ["websockets>=12"]
+
+[project.optional-dependencies]
+llm = ["anthropic"]
+dev = ["pytest"]
+
+[project.scripts]
+colosseo = "colosseo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["colosseo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a running Colosseo server (COLOSSEO_SERVER, default http://localhost:7070)"]

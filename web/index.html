@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MTG Colosseo</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23c8a24a'/%3E%3Cpath d='M18 44V26l14-8 14 8v18' fill='none' stroke='%231b1f2a' stroke-width='5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="brand-mark">&#9876;</span> MTG Colosseo
+    </a>
+    <nav>
+      <a href="#/">Lobby</a>
+      <a href="#/decks">Decks</a>
+      <a href="#/agents">Agents</a>
+    </nav>
+    <span id="conn-status" class="conn-status"></span>
+  </header>
+  <main id="app"></main>
+  <div id="preview" class="preview hidden"></div>
+  <div id="modal-root"></div>
+  <div id="toasts"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
