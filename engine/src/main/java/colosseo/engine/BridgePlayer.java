@@ -659,9 +659,18 @@ public class BridgePlayer extends HumanPlayer {
     // mana payment
     // ------------------------------------------------------------------------------------------------
 
+    // guards against auto-payment loops (mana produced but not usable for this cost)
+    private transient String autoPayKey;
+    private transient int autoPayAttempts;
+
     @Override
     public boolean playMana(Ability ability, ManaCost unpaid, String promptText, Game game) {
-        if (canFeedback(game) && seat.config().autoPay) {
+        String key = ability.getId() + "|" + unpaid.getText();
+        if (!key.equals(autoPayKey)) {
+            autoPayKey = key;
+            autoPayAttempts = 0;
+        }
+        if (canFeedback(game) && seat.config().autoPay && autoPayAttempts++ < 4) {
             boolean oldMode = payManaMode;
             payManaMode = true;
             ManaCost oldUnpaid = currentlyUnpaidMana;

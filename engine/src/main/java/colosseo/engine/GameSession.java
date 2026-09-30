@@ -166,8 +166,9 @@ public final class GameSession {
                 break;
             default:
                 player = new BridgePlayer(sc.name);
+                // mana in the pool is always used automatically (no "restricted" stock mode)
                 player.setUserData(new UserData(UserGroup.DEFAULT, 0, false, false, new UserSkipPrioritySteps(),
-                        "world", false, true, true, false, false, true, 1, true, false, ""));
+                        "world", false, true, false, false, false, true, 1, true, false, ""));
         }
         return player;
     }

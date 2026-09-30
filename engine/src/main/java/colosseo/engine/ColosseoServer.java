@@ -386,7 +386,7 @@ public final class ColosseoServer {
         o.addProperty("toughness", ci.getToughness());
         JsonArray rules = new JsonArray();
         for (String r : ci.getRules()) {
-            String t = Json.plain(r);
+            String t = Json.plain(r).replace("{this}", ci.getName());
             if (!t.isEmpty()) {
                 rules.add(t);
             }

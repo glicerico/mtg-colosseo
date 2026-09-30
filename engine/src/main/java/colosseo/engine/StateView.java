@@ -250,7 +250,7 @@ public final class StateView {
         }
         JsonArray arr = new JsonArray();
         for (String line : raw) {
-            String t = Json.plain(line);
+            String t = Json.plain(line).replace("{this}", obj.getName());
             if (!t.isEmpty()) {
                 arr.add(t);
             }

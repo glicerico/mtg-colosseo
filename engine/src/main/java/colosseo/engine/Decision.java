@@ -107,6 +107,9 @@ public final class Decision {
                 o.add(e.getKey(), e.getValue());
             }
         }
+        if (defaultAction != null) {
+            o.add("default", defaultAction);
+        }
         if (state != null) {
             o.add("state", state);
         }
