@@ -114,6 +114,7 @@ public final class Json {
         }
         String s = BREAK_TAG.matcher(html).replaceAll("\n");
         s = HTML_TAG.matcher(s).replaceAll("");
+        s = s.replaceAll("ICON_[A-Z_]+", "");
         s = s.replace("&nbsp;", " ")
                 .replace("&mdash;", "\u2014")
                 .replace("&ndash;", "\u2013")

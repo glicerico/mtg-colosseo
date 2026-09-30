@@ -100,8 +100,9 @@ while decision is not None:
     decision, reward, done, info = env.step(my_policy(decision))
 ```
 
-Baseline results (10-game matches, random FDN deck pairings): `HeuristicAgent` beats `RandomAgent` about 7-3;
-XMage MAD at skill 1 beats `HeuristicAgent` about 7-2 and `RandomAgent` 10-0.
+Baseline ladder from small runs (random FDN deck pairings): `HeuristicAgent` beats `RandomAgent` roughly
+7-3, and XMage's MAD AI at skill 1 wins about 80-90% of games against `HeuristicAgent` and essentially all
+against `RandomAgent` - plenty of headroom for research agents.
 
 More: [docs/agents.md](docs/agents.md) (SDK guide), [docs/protocol.md](docs/protocol.md) (wire protocol for
 other languages), [docs/architecture.md](docs/architecture.md) (engine internals, adding sets and decks).

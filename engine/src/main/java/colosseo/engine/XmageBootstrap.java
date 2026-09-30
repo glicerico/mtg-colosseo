@@ -39,6 +39,9 @@ public final class XmageBootstrap {
         if (!errors.isEmpty()) {
             LogManager.getLogger("colosseo").warn("card scan reported " + errors.size() + " problems (first: " + errors.get(0) + ")");
         }
+        // XMage initializes the token repository lazily and not thread-safely: warm it up before games run in parallel
+        mage.cards.repository.TokenRepository.instance.init();
+        mage.cards.repository.TokenRepository.instance.getAll();
         LogManager.getLogger("colosseo").info("card database ready in " + (System.currentTimeMillis() - t0) + " ms");
         done = true;
     }
