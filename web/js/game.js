@@ -1,5 +1,5 @@
 // Game board: renders the observation and turns clicks into protocol actions.
-import { wsUrl, getGame } from './api.js';
+import { wsUrl, getGame, seatToken, ownerToken, forgetToken } from './api.js';
 import { h, modal, toast, closeAllModals, manaSymbols, escapeRules } from './ui.js';
 import { renderCard, cardBack, hidePreview, settings, setImages } from './cards.js';
 
@@ -33,7 +33,10 @@ export class GameView {
     this.cache = new Map();
     this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
     this.reveal = localStorage.getItem('colosseo.reveal') === '1';
+    this.mayReveal = true; // until the server says otherwise
     this.waiting = null; // spectator: {seat, kind, prompt}
+    this.lastError = null;
+    this.retryMs = 1000;
     this.destroyed = false;
     this.pollTimer = null;
     this.keyHandler = (e) => this.onKey(e);
@@ -88,20 +91,52 @@ export class GameView {
   // --- connection ----------------------------------------------------------------------------------
 
   connect() {
+    // seats need their token on protected games; spectators send the owner token (if this browser created
+    // the game or opened an owner link) so that they may show both hands
+    const token = this.isPlayer ? seatToken(this.gameId, this.seat) : ownerToken(this.gameId);
+    const tq = token ? `&token=${encodeURIComponent(token)}` : '';
     const path = this.isPlayer
-      ? `/ws/game/${this.gameId}?seat=${this.seat}`
-      : `/ws/game/${this.gameId}?spectate=1${this.reveal ? '&reveal=1' : ''}`;
+      ? `/ws/game/${this.gameId}?seat=${this.seat}${tq}`
+      : `/ws/game/${this.gameId}?spectate=1${this.reveal ? '&reveal=1' : ''}${tq}`;
     const ws = new WebSocket(wsUrl(path));
     this.ws = ws;
     const status = document.getElementById('conn-status');
     status.textContent = 'connecting…';
-    ws.onopen = () => { status.textContent = this.isPlayer ? `seat ${this.seat}` : 'spectating'; };
-    ws.onclose = () => {
+    ws.onopen = () => { status.textContent = this.isPlayer ? `seat ${this.seat}` : 'spectating'; this.retryMs = 1000; };
+    ws.onclose = (ev) => {
       if (this.destroyed || ws !== this.ws) return;
+      if (ev.code === 4001 || ev.code === 4003 || ev.code === 4004) {
+        // refused (bad or missing token, unknown game, ...): retrying can't help
+        if (ev.code === 4001 && this.isPlayer) forgetToken(this.gameId, this.seat);
+        status.textContent = 'access denied';
+        this.showFatal(ev.code, this.lastError || ev.reason);
+        return;
+      }
       status.textContent = 'disconnected';
-      if (!this.result) setTimeout(() => { if (!this.destroyed) this.connect(); }, 2000);
+      if (!this.result) {
+        setTimeout(() => { if (!this.destroyed) this.connect(); }, this.retryMs);
+        this.retryMs = Math.min(this.retryMs * 2, 15000);
+      }
     };
     ws.onmessage = (m) => this.onMessage(JSON.parse(m.data));
+  }
+
+  showFatal(code, message) {
+    const e = this.el;
+    const hint = code === 4004 ? 'This game does not exist (any more) on this server.'
+      : code === 4001 ? (this.isPlayer
+        ? 'This seat is protected. Open the invite link you were given for it (it contains the seat token), or ask the game creator for one.'
+        : 'This game is protected.')
+        : 'The server refused this connection.';
+    e.banner.classList.remove('hidden');
+    e.banner.classList.add('error');
+    e.banner.replaceChildren(h('b', {}, 'Can’t join this game. '), hint,
+      message ? h('div', { class: 'muted' }, `Server: ${message}`) : null,
+      h('div', {}, h('a', { class: 'btn small', href: '#/' }, 'Back to lobby'), ' ',
+        this.isPlayer ? h('a', { class: 'btn small', href: `#/watch/${this.gameId}` }, 'Watch instead') : null));
+    this.el.center.textContent = '';
+    const controls = e.header.querySelector('.side-controls');
+    if (controls) controls.replaceChildren();
   }
 
   send(msg) {
@@ -123,6 +158,11 @@ export class GameView {
     switch (msg.type) {
       case 'hello':
         this.game = msg.game;
+        this.lastError = null;
+        if (!this.isPlayer) {
+          this.mayReveal = !!msg.may_reveal;
+          this.reveal = !!msg.reveal;
+        }
         if (msg.state) this.state = msg.state;
         this.log = [];
         this.el.log.innerHTML = '';
@@ -158,6 +198,15 @@ export class GameView {
         toast(msg.message, 'info');
         break;
       case 'error':
+        this.lastError = msg.message;
+        if (!this.isPlayer && /^revealing hands requires/.test(msg.message || '')) {
+          this.mayReveal = false;
+          this.reveal = false;
+          this.renderHeader();
+          break;
+        }
+        if (msg.code === 'stale') break; // an answer for a decision that is no longer pending
+        if (!this.game) break; // refused before joining: the connection closes and showFatal explains
         if (this.sent && msg.decision_id === this.sent.decision_id) {
           this.decision = this.sent;
           this.sent = null;
@@ -220,15 +269,16 @@ export class GameView {
       controls.push(h('label', { class: 'toggle', title: 'Stop at every step where you could act' }, full, ' Full control'));
       controls.push(h('button', { class: 'btn small danger', onclick: () => this.confirmConcede() }, 'Concede'));
     } else {
-      const rev = h('input', { type: 'checkbox', checked: this.reveal });
+      const rev = h('input', { type: 'checkbox', checked: this.reveal && this.mayReveal, disabled: !this.mayReveal });
       rev.addEventListener('change', () => {
         this.reveal = rev.checked;
         localStorage.setItem('colosseo.reveal', this.reveal ? '1' : '0');
-        this.send({ type: 'settings', reveal: this.reveal });
-        if (this.ws) { const old = this.ws; this.ws = null; old.close(); }
-        this.connect();
+        this.send({ type: 'settings', reveal: this.reveal }); // the server answers with the matching view
       });
-      controls.push(h('label', { class: 'toggle', title: 'Show both hands' }, rev, ' Show hands'));
+      controls.push(h('label', {
+        class: 'toggle' + (this.mayReveal ? '' : ' disabled'),
+        title: this.mayReveal ? 'Show both hands (and the agents’ comments)' : 'Only the game’s creator can show hands on a protected game',
+      }, rev, ' Show hands'));
     }
     const img = h('input', { type: 'checkbox', checked: settings.images });
     img.addEventListener('change', () => { setImages(img.checked); this.cache.clear(); this.render(); });
@@ -253,12 +303,14 @@ export class GameView {
           this.el.banner.classList.add('hidden');
           clearInterval(this.pollTimer);
         } else {
+          const token = seatToken(this.gameId, other.seat);
           this.el.banner.classList.remove('hidden');
           this.el.banner.replaceChildren(
             h('b', {}, 'Waiting for an agent to take seat ' + other.seat + '. '),
             'Connect one with the Python SDK:',
             h('pre', {}, `python -c "from colosseo import play; from colosseo.agents import HeuristicAgent; ` +
-              `play(HeuristicAgent(), '${this.gameId}', ${other.seat}, '${location.origin}')"`));
+              `play(HeuristicAgent(), '${this.gameId}', ${other.seat}, '${location.origin}'${token ? `, token='${token}'` : ''})"`),
+            token ? null : h('div', { class: 'muted' }, 'This browser does not hold the seat token; on a protected game ask the game’s creator for it.'));
         }
       } catch { /* ignore */ }
     };
@@ -277,13 +329,17 @@ export class GameView {
   showResult() {
     const r = this.result || {};
     let title;
-    if (r.error) title = 'Game ended with an error';
+    if (r.status === 'terminated') title = 'Game stopped';
+    else if (r.status === 'abandoned') title = 'Game abandoned';
+    else if (r.status === 'timeout') title = 'Game timed out';
+    else if (r.error) title = 'Game ended with an error';
     else if (r.winner_seat === null || r.winner_seat === undefined) title = 'Draw';
     else if (this.isPlayer) title = r.winner_seat === this.seat ? 'Victory!' : 'Defeat';
     else title = `${r.winner} wins`;
     modal(title, h('div', { class: 'result' },
       h('p', {}, `${r.turns || 0} turns · ${r.decisions || 0} decisions · ${Math.round(r.duration_s || 0)} s`),
       (r.players || []).map((p) => h('div', {}, `${p.name} (${p.type}) — life ${p.life}${p.won ? ' — winner' : ''}`)),
+      r.reason && r.reason !== r.error ? h('p', { class: 'muted' }, r.reason) : null,
       r.error ? h('p', { class: 'error' }, r.error) : null),
     [{ label: 'View board' }, { label: 'Back to lobby', cls: 'primary', onClick: () => { location.hash = '#/'; } }]);
   }

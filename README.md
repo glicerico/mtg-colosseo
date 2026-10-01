@@ -11,8 +11,11 @@ A research platform where **agents and humans play Magic: The Gathering** agains
   then play against XMage's AI, other agents or yourself. Matches, round-robin tournaments with Elo, a
   step/reset environment and JSONL game records for training data come built in.
 - **Arena-style web client**: click to play cards, click to attack/block, targets and dialogs as popups,
-  card images from Scryfall, spectator mode (optionally with both hands revealed) that shows agents'
-  one-line rationales as they play.
+  card images from Scryfall, spectator mode (with both hands and the agents' one-line rationales for the
+  game's creator).
+- **Fair by construction**: observations and opponent notices never reveal hidden cards, agents' comments stay
+  private, seats and revealing views are protected by per-game tokens when the server is exposed, and
+  interrupted games are never scored.
 - **Limited to start**: eight 40-card two-color decks from *Foundations* (FDN) plus randomly generated sealed
   decks (FDN and Bloomburrow). Any XMage set works - adding a deck is dropping an XMage `.dck` file in `decks/`.
 
@@ -37,12 +40,22 @@ scripts/run_server.sh     # http://localhost:7070  (first start builds the card 
 
 Open http://localhost:7070, pick a deck and play against XMage's AI, or start an AI-vs-AI exhibition and watch.
 
-Or with Docker:
+The server listens on `127.0.0.1` in *open* mode (no tokens needed - for local use). To let other machines
+connect, bind to all interfaces: the server then requires the per-game tokens returned when a game is created
+(the lobby keeps them; invitation links carry them), and `COLOSSEO_API_KEY` restricts who may create games:
+
+```bash
+HOST=0.0.0.0 COLOSSEO_API_KEY=change-me scripts/run_server.sh
+```
+
+Or with Docker (token mode, since the container listens on all interfaces):
 
 ```bash
 docker build -t mtg-colosseo .
-docker run -p 7070:7070 -v colosseo-data:/app/data mtg-colosseo
+docker run -p 127.0.0.1:7070:7070 -e COLOSSEO_API_KEY=change-me -v colosseo-data:/app/data mtg-colosseo
 ```
+
+See [docs/architecture.md](docs/architecture.md#deployment-and-access-control) for the access-control model.
 
 ## Writing an agent
 
@@ -68,7 +81,7 @@ class MyAgent(Agent):
             return d.attack([a["id"] for a in d["attackers"]])   # all in
         return d.default()                                       # safe default for anything else
 
-print(run_match(MyAgent, "xmage:2", games=10))                   # vs XMage's AI, random deck pairings
+print(run_match(MyAgent, "xmage:2", games=10, seed=1))          # vs XMage's AI, random deck pairings
 ```
 
 A `Decision` carries `kind`, `prompt`, `options` (each with an `id` and `label`), the observation `state`
@@ -125,9 +138,13 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
 - **Decision granularity**: priority is only asked when the seat has a legal non-mana action (`auto_pass`,
   default on); mana is paid automatically (`auto_pay`). Seats can opt into asking at every priority
   (`"auto_pass": false`) and manual payment (`"auto_pay": false`).
-- **Timeouts**: `timeout_s` on a seat applies the decision's default action when an agent is too slow.
-- **Determinism**: `seed` seeds XMage's RNG (best effort: the RNG is shared by concurrent games and the AI is
-  time-bounded).
+- **Timeouts**: `timeout_s` on a seat applies the decision's default action when an agent is too slow;
+  `deadline_s` bounds a whole game and `abandon_timeout_s` stops games whose agent disconnected.
+- **Scoring**: only games the engine finished count (`colosseo.outcome`); interrupted, stopped or crashed
+  games are reported as errors, never as draws, and don't change Elo.
+- **Determinism**: matches follow a schedule computed from their seed (deck pairings, seats, alternating
+  starting player, one engine seed per game), identical with any parallelism and stored with the results.
+  Gameplay is best-effort reproducible: XMage's RNG is shared by concurrent games and its AI is time-bounded.
 - **Resources**: MAD AI games are CPU and memory hungry - give the JVM ~1 GB per concurrently running AI
   game (`JAVA_OPTS=-Xmx8g scripts/run_server.sh`).
 

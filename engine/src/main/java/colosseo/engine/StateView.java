@@ -360,6 +360,33 @@ public final class StateView {
     /**
      * Short description of any game object id (player, permanent, card, stack object), used for decision options.
      */
+    /**
+     * Whether an object is hidden from the opponent of its owner: a card in a hand, a library or outside
+     * the game, or anything face down. Choices among such objects are private to the deciding player.
+     */
+    public static boolean isHidden(Game game, UUID id) {
+        if (id == null || game.getPlayer(id) != null) {
+            return false;
+        }
+        Permanent perm = game.getPermanent(id);
+        if (perm != null) {
+            return perm.isFaceDown(game);
+        }
+        StackObject so = game.getStack().getStackObject(id);
+        if (so != null) {
+            return so instanceof Spell && ((Spell) so).isFaceDown(game);
+        }
+        Card card = game.getCard(id);
+        if (card == null) {
+            return game.getObject(id) == null;
+        }
+        return isHiddenZone(game.getState().getZone(id)) || card.isFaceDown(game);
+    }
+
+    public static boolean isHiddenZone(Zone zone) {
+        return zone == null || zone == Zone.HAND || zone == Zone.LIBRARY || zone == Zone.OUTSIDE;
+    }
+
     public static JsonObject describe(Game game, UUID id, UUID viewerId) {
         JsonObject o = new JsonObject();
         o.addProperty("id", Json.str(id));

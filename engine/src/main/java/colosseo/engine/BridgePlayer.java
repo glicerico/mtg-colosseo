@@ -368,6 +368,20 @@ public class BridgePlayer extends HumanPlayer {
         if (source instanceof Card || source instanceof Permanent) {
             o.addProperty("mana_cost", ability.getManaCostsToPay().getText());
         }
+        if (StateView.isHidden(game, ability.getSourceId())) {
+            // the action may still fail (no target, cost not paid): don't name a hidden card to the opponent
+            String where = zone == Zone.HAND ? "hand" : zone == Zone.LIBRARY ? "library" : "a hidden zone";
+            switch (kind) {
+                case "play_land":
+                    d.markPrivate(id, "Play a land from " + where);
+                    break;
+                case "cast":
+                    d.markPrivate(id, "Cast a spell from " + where);
+                    break;
+                default:
+                    d.markPrivate(id, "Activate an ability of a hidden card");
+            }
+        }
     }
 
     private static String ruleText(Ability ability, String objectName) {

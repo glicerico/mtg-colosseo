@@ -27,9 +27,58 @@ public final class GameManager {
         return t;
     });
 
+    private final int maxRunning;
+    private final double defaultAbandonTimeoutS;
+
+    /**
+     * Thrown when the server already runs its maximum number of games.
+     */
+    public static final class TooManyGamesException extends RuntimeException {
+        TooManyGamesException(String message) {
+            super(message);
+        }
+    }
+
     public GameManager(DeckLibrary decks, Path dataDir) {
+        this(decks, dataDir, 0, 0);
+    }
+
+    /**
+     * @param maxRunning             maximum number of concurrently running games (0 = unlimited)
+     * @param defaultAbandonTimeoutS stop games whose bridge seat stays disconnected this long (0 = never);
+     *                               games may override it with "abandon_timeout_s"
+     */
+    public GameManager(DeckLibrary decks, Path dataDir, int maxRunning, double defaultAbandonTimeoutS) {
         this.decks = decks;
         this.dataDir = dataDir;
+        this.maxRunning = maxRunning;
+        this.defaultAbandonTimeoutS = defaultAbandonTimeoutS;
+        timers.scheduleWithFixedDelay(this::checkLiveness, 5, 5, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    public int maxRunning() {
+        return maxRunning;
+    }
+
+    public synchronized int running() {
+        int n = 0;
+        for (GameSession g : games.values()) {
+            if ("running".equals(g.status()) || "created".equals(g.status())) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private void checkLiveness() {
+        long now = System.currentTimeMillis();
+        for (GameSession g : list()) {
+            try {
+                g.checkLiveness(now, defaultAbandonTimeoutS);
+            } catch (RuntimeException e) {
+                org.apache.log4j.Logger.getLogger(GameManager.class).warn("liveness check failed for " + g.id, e);
+            }
+        }
     }
 
     public DeckLibrary decks() {
@@ -45,9 +94,13 @@ public final class GameManager {
     }
 
     public GameSession create(GameConfig config) {
-        String id = UUID.randomUUID().toString().substring(0, 8);
+        // ids are listed publicly; they are not secrets (tokens are)
+        String id = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         GameSession session = new GameSession(id, config, this);
         synchronized (this) {
+            if (maxRunning > 0 && running() >= maxRunning) {
+                throw new TooManyGamesException("the server already runs " + maxRunning + " games; try again later");
+            }
             games.put(id, session);
         }
         try {

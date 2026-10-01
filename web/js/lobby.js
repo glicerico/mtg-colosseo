@@ -1,5 +1,5 @@
 // Lobby (create/watch games), deck browser and agent connection guide.
-import { getDecks, getSets, getGames, createGame, getDeck, terminateGame } from './api.js';
+import { getDecks, getSets, getGames, createGame, terminateGame, getHealth, apiKey, setApiKey, seatToken, ownerToken } from './api.js';
 import { h, toast, colorPips, manaSymbols } from './ui.js';
 import { settings, setImages, showPreview, hidePreview } from './cards.js';
 
@@ -52,7 +52,9 @@ export function renderLobby(app) {
         'Play limited decks against XMage’s AI or your own agents, or watch agents battle it out.')),
     h('div', { class: 'lobby-grid' }, playCard, watchCard, gamesCard));
 
-  deckOptions().then((options) => {
+  let health = {};
+  Promise.all([deckOptions(), getHealth().catch(() => ({}))]).then(([options, h0]) => {
+    health = h0 || {};
     if (destroyed) return;
     // --- play form -----------------------------------------------------------------------------
     const name = h('input', { class: 'input', value: prefs.name || 'Planeswalker', maxlength: 24 });
@@ -87,14 +89,21 @@ export function renderLobby(app) {
           starting_seat: parseInt(starting.value, 10),
           title: `${name.value} vs ${opp.name}`,
         });
-        if (opp.type === 'agent') sessionStorage.setItem(`colosseo.agentseat.${res.game_id}`, JSON.stringify(res.seats[1]));
         location.hash = `#/game/${res.game_id}/seat/0`;
       } catch (e) {
         toast(e.message, 'error');
         start.disabled = false;
       }
     });
+    // servers started with --api-key only let key holders create games
+    const keyRow = () => {
+      if (!health.api_key_required) return null;
+      const key = h('input', { class: 'input', type: 'password', value: apiKey(), placeholder: 'required by this server', autocomplete: 'off' });
+      key.addEventListener('change', () => setApiKey(key.value.trim()));
+      return h('div', { class: 'form-row' }, h('label', { title: 'The server was started with --api-key' }, 'API key'), key);
+    };
     playCard.replaceChildren(h('h2', {}, 'Play'),
+      keyRow(),
       h('div', { class: 'form-row' }, h('label', {}, 'Your name'), name),
       h('div', { class: 'form-row' }, h('label', {}, 'Your deck'), myDeck),
       h('div', { class: 'form-row' }, h('label', {}, 'Opponent'), oppType),
@@ -134,6 +143,7 @@ export function renderLobby(app) {
     });
     watchCard.replaceChildren(h('h2', {}, 'Watch AI vs AI'),
       h('p', { class: 'muted' }, 'Two XMage AIs play each other. Agent games started from Python show up in the list and can be watched too.'),
+      keyRow(),
       h('div', { class: 'form-row' }, h('label', {}, 'Deck 1'), d1),
       h('div', { class: 'form-row' }, h('label', {}, 'AI 1 skill'), s1),
       h('div', { class: 'form-row' }, h('label', {}, 'Deck 2'), d2),
@@ -141,7 +151,15 @@ export function renderLobby(app) {
       h('div', { class: 'form-row' }, h('label', {}, 'Pace'), pace),
       watchBtn);
   }).catch((e) => {
-    playCard.replaceChildren(h('h2', {}, 'Play'), h('p', { class: 'error' }, `Can't load decks: ${e.message}`));
+    // servers started with --api-key only let key holders create games
+    const keyRow = () => {
+      if (!health.api_key_required) return null;
+      const key = h('input', { class: 'input', type: 'password', value: apiKey(), placeholder: 'required by this server', autocomplete: 'off' });
+      key.addEventListener('change', () => setApiKey(key.value.trim()));
+      return h('div', { class: 'form-row' }, h('label', { title: 'The server was started with --api-key' }, 'API key'), key);
+    };
+    playCard.replaceChildren(h('h2', {}, 'Play'),
+      keyRow(), h('p', { class: 'error' }, `Can't load decks: ${e.message}`));
   });
 
   // --- games list ------------------------------------------------------------------------------
@@ -156,8 +174,16 @@ export function renderLobby(app) {
           h('tr', {}, h('th', {}, 'Game'), h('th', {}, 'Players'), h('th', {}, 'Status'), h('th', {}, 'Turn'), h('th', {})),
           games.slice(0, 30).map((g) => {
             const res = g.result || {};
-            const outcome = g.result ? (res.winner_seat === null || res.winner_seat === undefined ? 'draw' : `${res.winner} won`) : '';
-            const humanSeat = g.seats.find((s) => s.type === 'human');
+            let outcome = '';
+            if (g.result) {
+              if (res.status && res.status !== 'finished') outcome = res.reason || res.status;
+              else if (res.winner_seat !== null && res.winner_seat !== undefined) outcome = `${res.winner} won`;
+              else if (res.draw) outcome = 'draw';
+              else outcome = res.error || 'no result';
+            }
+            // protected games: only offer what this browser holds a token for
+            const humanSeat = g.seats.find((s) => s.type === 'human' && (!g.protected || seatToken(g.id, s.seat)));
+            const canStop = !g.protected || ownerToken(g.id) || apiKey();
             return h('tr', {},
               h('td', { class: 'mono' }, g.id),
               h('td', {}, g.seats.map((s, i) => h('span', { class: 'seat-chip' }, `${s.name}`, h('small', {}, ` ${s.type}`), i === 0 ? ' vs ' : ''))),
@@ -166,7 +192,14 @@ export function renderLobby(app) {
               h('td', { class: 'actions' },
                 g.status === 'running' && humanSeat ? h('a', { class: 'btn small', href: `#/game/${g.id}/seat/${humanSeat.seat}` }, 'Rejoin') : null,
                 h('a', { class: 'btn small', href: `#/watch/${g.id}` }, g.status === 'running' ? 'Watch' : 'View'),
-                g.status === 'running' ? h('button', { class: 'btn small danger', onclick: async () => { await terminateGame(g.id); refresh(); } }, 'Stop') : null));
+                g.status === 'running' && canStop ? h('button', {
+                  class: 'btn small danger',
+                  onclick: async () => {
+                    try { await terminateGame(g.id); } catch (e) { toast(e.message, 'error'); }
+                    refresh();
+                  },
+                }, 'Stop') : null,
+                g.protected ? h('span', { class: 'muted', title: 'Protected game: seats and hands need tokens' }, ' 🔒') : null));
           })));
       }
     } catch (e) {
@@ -241,16 +274,22 @@ print(run_match(MyAgent, "xmage:2", games=10, server="${origin}"))`),
 python -m colosseo --server ${origin} play --agent heuristic --opponent xmage:2
 python -m colosseo --server ${origin} tournament random heuristic xmage:1 --games 6`),
     h('h2', {}, 'Play against your agent'),
-    h('p', {}, 'In the lobby choose "External agent" as opponent. The game waits for your agent to connect to seat 1:'),
+    h('p', {}, 'In the lobby choose "External agent" as opponent. The game waits for your agent to connect to seat 1 ',
+      '(the game page shows the exact command, including the seat token protected servers require):'),
     code(`from colosseo import play
 from colosseo.agents import HeuristicAgent
-play(HeuristicAgent(), game_id="<id shown in the game>", seat=1, server="${origin}")`),
+play(HeuristicAgent(), game_id="<id shown in the game>", seat=1, server="${origin}", token="<seat token>")`),
+    h('h2', {}, 'Access control'),
+    h('p', {}, 'Creating a game returns a token per agent/human seat and an owner token. A server bound to localhost runs ',
+      'in open mode (tokens optional); any other server, or a game created with ', h('code', {}, '"require_tokens": true'),
+      ', requires the seat token to control a seat and the owner token to show both hands or stop the game. ',
+      'Opponents and ordinary spectators never see cards picked from hidden zones nor agents’ comments.'),
     h('h2', {}, 'Raw protocol'),
     code(`POST ${origin}/api/games
 {"seats": [{"type": "agent", "deck": "fdn:azorius-skies"},
            {"type": "xmage", "deck": "fdn:gruul-stompers", "skill": 2}]}
 
-WebSocket ${origin.replace('http', 'ws')}/ws/game/<game_id>?seat=0
+WebSocket ${origin.replace('http', 'ws')}/ws/game/<game_id>?seat=0&token=<seat token>
 <- {"type": "decision", "decision_id": 7, "kind": "priority", "options": [...], "state": {...}}
 -> {"type": "action", "decision_id": 7, "choice": "<option id>"}`),
     h('p', {}, 'See docs/protocol.md in the repository for every decision kind and message.'));

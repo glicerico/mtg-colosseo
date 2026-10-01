@@ -181,6 +181,10 @@ final class QueryTranslator {
             if (chosen.contains(id)) {
                 opt.addProperty("selected", true);
             }
+            if (StateView.isHidden(game, id)) {
+                // e.g. the card put on the bottom after a mulligan, a card searched for or discarded
+                d.markPrivate(id.toString(), "a hidden card");
+            }
         }
         boolean required = e.isRequired();
         if (!required) {
@@ -304,6 +308,9 @@ final class QueryTranslator {
             }
             JsonObject o = d.addOption(ability.getId().toString(), Json.plain(rule));
             o.addProperty("source_id", Json.str(ability.getSourceId()));
+            if (StateView.isHidden(game, ability.getSourceId())) {
+                d.markPrivate(ability.getId().toString(), "an ability of a hidden card");
+            }
         }
         d.addOption("cancel", "Cancel");
         d.defaultAction = Decision.choiceAction(d.options.keySet().iterator().next());

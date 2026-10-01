@@ -22,7 +22,13 @@ def decisions(raw_decisions):
     return {k: Decision(json.loads(json.dumps(v))) for k, v in raw_decisions.items()}
 
 
+#: set COLOSSEO_REQUIRE_SERVER=1 (as CI does) to make integration tests fail instead of skipping
+REQUIRE_SERVER = os.environ.get("COLOSSEO_REQUIRE_SERVER") == "1"
+
+
 def server_up() -> bool:
+    if REQUIRE_SERVER:
+        return True
     from colosseo import ColosseoClient
     try:
         ColosseoClient(SERVER, timeout=3).health()

@@ -19,8 +19,12 @@ import java.util.List;
  *   "starting_seat": -1,      // -1 = random
  *   "max_turns": 60,          // draw after this many turns
  *   "pace_ms": 0,             // slow games down for spectators (sleep per engine update)
- *   "seed": 123,              // optional, best effort (XMage shares one RNG across games)
- *   "record": true            // write a JSONL decision log under data/games
+ *   "seed": 123,              // optional (generated and recorded when absent); best effort, XMage shares one RNG
+ *   "record": true,           // write a JSONL decision log under data/games
+ *   "public_comments": false, // show agents' comments to the opponent and every spectator
+ *   "require_tokens": false,  // require seat tokens even when the server runs in open mode
+ *   "abandon_timeout_s": 600, // stop the game when a bridge seat stays disconnected this long (0 = never)
+ *   "deadline_s": 0           // stop the game after this many seconds (0 = no deadline)
  * }
  * </pre>
  */
@@ -112,6 +116,13 @@ public final class GameConfig {
     public boolean record = true;
     public String title;
     public int startingLife = 20;
+    public boolean publicComments = false;
+    public boolean requireTokens = false;
+    /**
+     * null = server default
+     */
+    public Double abandonTimeoutS;
+    public double deadlineS = 0;
 
     public static GameConfig parse(JsonObject o) {
         GameConfig c = new GameConfig();
@@ -138,6 +149,12 @@ public final class GameConfig {
         c.record = Json.getBool(o, "record", true);
         c.title = Json.getString(o, "title", null);
         c.startingLife = Json.getInt(o, "starting_life", 20);
+        c.publicComments = Json.getBool(o, "public_comments", false);
+        c.requireTokens = Json.getBool(o, "require_tokens", false);
+        if (o.has("abandon_timeout_s") && !o.get("abandon_timeout_s").isJsonNull()) {
+            c.abandonTimeoutS = Math.max(0, o.get("abandon_timeout_s").getAsDouble());
+        }
+        c.deadlineS = o.has("deadline_s") && !o.get("deadline_s").isJsonNull() ? Math.max(0, o.get("deadline_s").getAsDouble()) : 0;
         return c;
     }
 
@@ -156,6 +173,11 @@ public final class GameConfig {
         }
         o.addProperty("record", record);
         o.addProperty("title", title);
+        o.addProperty("starting_life", startingLife);
+        o.addProperty("public_comments", publicComments);
+        o.addProperty("require_tokens", requireTokens);
+        o.addProperty("abandon_timeout_s", abandonTimeoutS);
+        o.addProperty("deadline_s", deadlineS);
         return o;
     }
 }
