@@ -78,6 +78,10 @@ public final class GameSession {
     private final Map<Integer, JsonObject> finalSeatStates = new ConcurrentHashMap<>();
     private volatile String stopOutcome;
     private volatile String stopReason;
+    // a seat that forfeited (conceded, ran out of time, agent error) and why
+    private volatile Integer forfeitSeat;
+    private volatile String forfeitReason;
+    private long recordBytes;
     private long seed;
     private int startingSeat = -1;
     private Thread thread;
@@ -140,6 +144,7 @@ public final class GameSession {
         for (Seat seat : seats) {
             GameConfig.SeatConfig sc = seat.config();
             Deck deck = manager.decks().load(sc.deck);
+            seat.deckFingerprint = DeckLibrary.fingerprint(deck);
             Player player = createPlayer(sc);
             seat.player = player;
             seat.playerId = player.getId();
@@ -187,6 +192,9 @@ public final class GameSession {
 
     private void run() {
         try {
+            // with the patched XMage (scripts/xmage-patches) this gives the game thread its own generator, so
+            // the seed alone decides the game's shuffles, whatever other games run at the same time
+            RandomUtil.setSeed(seed);
             game.start(game.getStartingPlayerId());
         } catch (Throwable t) {
             LOG.error("game " + id + " crashed", t);
@@ -201,6 +209,7 @@ public final class GameSession {
         for (Seat seat : seats) {
             seat.pending.set(null);
             seat.cancelTimeout();
+            seat.cancelClock();
         }
         // only a game the rules engine ended by itself has a winner or is a draw; a stopped or crashed game
         // has an explicit non-terminal outcome so that it is never scored
@@ -221,6 +230,10 @@ public final class GameSession {
         r.addProperty("draw", finished && winner == null);
         if (finished && winner == null && drawDeclared) {
             r.addProperty("reason", "turn_limit");
+        } else if (finished && forfeitSeat != null && winner != null && winner != (int) forfeitSeat) {
+            r.addProperty("reason", "forfeit");
+            r.addProperty("forfeit_seat", forfeitSeat);
+            r.addProperty("forfeit_reason", forfeitReason);
         } else if (!finished) {
             r.addProperty("reason", stopReason != null ? stopReason : error);
             r.addProperty("error", stopReason != null ? stopReason : error);
@@ -237,6 +250,11 @@ public final class GameSession {
             p.addProperty("name", seat.config().name);
             p.addProperty("type", seat.config().type);
             p.addProperty("deck", seat.config().deck);
+            p.addProperty("agent_id", seat.config().agentId());
+            p.add("fallbacks", seat.fallbacksJson());
+            if (seat.config().timeBankS > 0) {
+                p.addProperty("clock_used_s", Math.round(seat.clockUsedS * 1000) / 1000.0);
+            }
             if (seat.player != null) {
                 p.addProperty("life", seat.player.getLife());
                 p.addProperty("won", finished && seat.player.hasWon());
@@ -254,6 +272,9 @@ public final class GameSession {
         msg.add("result", r);
         record("result", r);
         closeRecorder();
+        if (config.rated) {
+            manager.leaderboard().add(id, endedAt, r);
+        }
 
         // final views keep the usual hidden-information rules; they are cached for clients that attach later
         // (the XMage game itself is released below)
@@ -394,11 +415,40 @@ public final class GameSession {
     }
 
     public void concede(Seat seat) {
+        forfeit(seat, "concede", "concedes");
+    }
+
+    /**
+     * The seat loses the game (concession, time forfeit, agent error). The result records who and why.
+     */
+    void forfeit(Seat seat, String reason, String message) {
         if (game == null || !"running".equals(status) || seat.player == null) {
             return;
         }
-        addLog(seat.config().name + " concedes");
+        synchronized (this) {
+            if (forfeitSeat != null) {
+                return;
+            }
+            forfeitSeat = seat.index;
+            forfeitReason = reason;
+        }
+        addLog(seat.config().name + " " + message);
         game.setConcedingPlayer(seat.playerId);
+    }
+
+    /**
+     * A default was applied instead of the seat's answer (engine-side safety nets); recorded and counted.
+     */
+    void noteFallback(Seat seat, Decision d, String reason, String message) {
+        seat.countFallback(reason);
+        addLog(seat.config().name + ": " + message);
+        JsonObject r = new JsonObject();
+        r.addProperty("seat", seat.index);
+        r.addProperty("decision_id", d.id);
+        r.addProperty("kind", d.kind);
+        r.addProperty("fallback", reason);
+        r.addProperty("message", message);
+        record("fallback", r);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -425,8 +475,12 @@ public final class GameSession {
     private void onUpdate() {
         if (config.maxTurns > 0 && game.getTurnNum() > config.maxTurns && !drawDeclared) {
             drawDeclared = true;
-            addLog("Turn limit (" + config.maxTurns + ") reached: the game is a draw");
-            game.setDraw(seats.get(0).playerId);
+            if ("void".equals(config.turnLimitResult)) {
+                stop("turn_limit", "turn limit (" + config.maxTurns + ") reached; the game is void");
+            } else {
+                addLog("Turn limit (" + config.maxTurns + ") reached: the game is a draw");
+                game.setDraw(seats.get(0).playerId);
+            }
             return;
         }
         boolean watched = false;
@@ -547,7 +601,11 @@ public final class GameSession {
             seat.lastDecisionKey = repeatKey;
             seat.repeatCount = 0;
         }
-        decisionCount.incrementAndGet();
+        if (decisionCount.incrementAndGet() > config.maxDecisions && config.maxDecisions > 0) {
+            // a runaway game (e.g. an agent looping on an illegal answer) is void, not a result
+            stop("limit", "decision limit (" + config.maxDecisions + ") reached");
+            return;
+        }
         d.state = StateView.build(game, seat.playerId, false, seatIndex);
         d.newLog = seat.takeNewLog(log);
         lastSeatState.put(seat.index, d.state);
@@ -557,6 +615,16 @@ public final class GameSession {
         record("decision", msg);
         seat.broadcast(msg);
         seat.scheduleTimeout(d);
+        seat.askedAtMs = System.currentTimeMillis();
+        double bank = seat.config().timeBankS;
+        if (bank > 0) {
+            seat.scheduleClock(() -> {
+                if (seat.pending.get() == d) {
+                    seat.clockUsedS = bank;
+                    forfeit(seat, "time", "ran out of thinking time (" + fmt(bank) + " s)");
+                }
+            }, bank - seat.clockUsedS);
+        }
 
         if (!spectators.isEmpty()) {
             JsonObject note = new JsonObject();
@@ -605,7 +673,14 @@ public final class GameSession {
             return err;
         }
         seat.cancelTimeout();
-        record("action", actionRecord(seat, d, action));
+        seat.cancelClock();
+        if (seat.config().timeBankS > 0) {
+            seat.clockUsedS += (System.currentTimeMillis() - seat.askedAtMs) / 1000.0;
+        }
+        String fallback = Json.getString(action, "fallback", null);
+        if (fallback != null) {
+            seat.countFallback(fallback);
+        }
         responder.execute(() -> {
             try {
                 d.responder.apply(action);
@@ -620,6 +695,10 @@ public final class GameSession {
         String comment = Json.getString(action, "comment", null);
         JsonObject full = ack(seat, d, summarize(d, action, true), comment);
         JsonObject pub = ack(seat, d, summarize(d, action, false), config.publicComments ? comment : null);
+        JsonObject rec = actionRecord(seat, d, action);
+        rec.addProperty("summary", Json.getString(full, "summary", ""));
+        rec.addProperty("public_summary", Json.getString(pub, "summary", ""));
+        record("action", rec);
         seat.broadcast(full);
         for (Seat other : seats) {
             if (other != seat) {
@@ -881,11 +960,21 @@ public final class GameSession {
         o.addProperty("game_id", id);
         o.addProperty("seed", seed);
         o.addProperty("starting_seat_actual", startingSeat);
+        // version pins: which engine, decks and agents produced this record
+        o.add("engine", BuildInfo.json());
         JsonArray players = new JsonArray();
         for (Seat seat : seats) {
             JsonObject p = new JsonObject();
             p.addProperty("seat", seat.index);
             p.addProperty("player_id", Json.str(seat.playerId));
+            p.addProperty("agent_id", seat.config().agentId());
+            if (seat.config().agentHash != null) {
+                p.addProperty("agent_hash", seat.config().agentHash);
+            }
+            if (seat.deckFingerprint != null) {
+                p.addProperty("deck_hash", seat.deckFingerprint.get("hash").getAsString());
+                p.add("decklist", seat.deckFingerprint.get("cards"));
+            }
             players.add(p);
         }
         o.add("players", players);
@@ -918,9 +1007,15 @@ public final class GameSession {
             line.addProperty("type", type);
             line.addProperty("t", System.currentTimeMillis());
             line.add("data", payload);
-            recorder.write(Json.GSON.toJson(line));
+            String text = Json.GSON.toJson(line);
+            recorder.write(text);
             recorder.newLine();
             recorder.flush();
+            recordBytes += text.length() + 1;
+            if (config.maxRecordMb > 0 && recordBytes > config.maxRecordMb * 1024 * 1024 && !"result".equals(type)
+                    && stopOutcome == null) {
+                timers().execute(() -> stop("limit", "game record grew past " + fmt(config.maxRecordMb) + " MB"));
+            }
         } catch (IOException e) {
             LOG.warn("record failed: " + e.getMessage());
         }

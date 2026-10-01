@@ -222,6 +222,7 @@ public final class StateView {
             c.addProperty("toughness", obj.getToughness().getValue());
         }
         c.add("rules", rules(game, obj));
+        c.add("keywords", keywords(game, obj));
 
         JsonObject counters = new JsonObject();
         if (obj instanceof Card) {
@@ -258,6 +259,61 @@ public final class StateView {
         return arr;
     }
 
+    private static final java.util.regex.Pattern REMINDER = java.util.regex.Pattern.compile("\\s*\\([^)]*\\)");
+    private static final java.util.regex.Pattern CAMEL = java.util.regex.Pattern.compile("(?<=[a-z])(?=[A-Z])");
+
+    /**
+     * Keyword abilities the object currently has, as the engine knows them (including granted ones, e.g. from
+     * equipment): "flying", "menace", "first strike", "ward {2}", "protection from red", ... Public facts that
+     * would otherwise have to be parsed out of the rules text.
+     */
+    static JsonArray keywords(Game game, MageObject obj) {
+        Iterable<Ability> abilities;
+        if (obj instanceof Permanent) {
+            abilities = ((Permanent) obj).getAbilities(game);
+        } else if (obj instanceof Card) {
+            abilities = ((Card) obj).getAbilities(game);
+        } else {
+            abilities = obj.getAbilities();
+        }
+        Set<String> out = new LinkedHashSet<>();
+        for (Ability a : abilities) {
+            if (!"mage.abilities.keyword".equals(a.getClass().getPackageName()) || a.getClass().getSimpleName().isEmpty()) {
+                continue;
+            }
+            String base = CAMEL.matcher(a.getClass().getSimpleName().replaceAll("Ability$", "")).replaceAll(" ").toLowerCase();
+            String rule;
+            try {
+                rule = lowerOutsideSymbols(REMINDER.matcher(Json.plain(a.getRule(obj.getName()))).replaceAll("").trim());
+            } catch (RuntimeException e) {
+                rule = "";
+            }
+            // prefer the rule when it is the keyword itself with its parameter ("ward {2}", "protection from red")
+            boolean usable = !rule.isEmpty() && rule.length() <= 40 && rule.indexOf('\n') < 0 && !rule.contains(". ")
+                    && rule.startsWith(base.split(" ")[0]);
+            if (!base.isEmpty()) {
+                out.add(usable ? rule.replaceAll("[.;]$", "") : base);
+            }
+        }
+        return Json.strings(out);
+    }
+
+    private static final java.util.regex.Pattern SYMBOL = java.util.regex.Pattern.compile("\\{[^}]*\\}");
+
+    /**
+     * "Kicker {3}{B}" -> "kicker {3}{B}": keywords in lower case, mana symbols as printed.
+     */
+    private static String lowerOutsideSymbols(String text) {
+        StringBuilder sb = new StringBuilder();
+        java.util.regex.Matcher m = SYMBOL.matcher(text);
+        int last = 0;
+        while (m.find()) {
+            sb.append(text.substring(last, m.start()).toLowerCase()).append(m.group());
+            last = m.end();
+        }
+        return sb.append(text.substring(last).toLowerCase()).toString();
+    }
+
     public static JsonObject permanent(Game game, Permanent perm, UUID viewerId, boolean revealAll) {
         JsonObject c;
         boolean masked = perm.isFaceDown(game) && !revealAll && (viewerId == null || !perm.isControlledBy(viewerId));
@@ -274,6 +330,7 @@ public final class StateView {
             c.add("types", types);
             c.addProperty("power", perm.getPower().getValue());
             c.addProperty("toughness", perm.getToughness().getValue());
+            c.add("keywords", new JsonArray());
         } else {
             c = card(game, perm);
         }
@@ -361,6 +418,40 @@ public final class StateView {
      * Short description of any game object id (player, permanent, card, stack object), used for decision options.
      */
     /**
+     * A stable ordering key for an object that does not depend on its (random) id: options are listed in this
+     * order, so the same position means the same choice in every replay of a seed. Objects with equal keys are
+     * interchangeable for the game (two untapped Plains).
+     */
+    static String sortKey(Game game, UUID id) {
+        StringBuilder k = new StringBuilder();
+        if (game.getPlayer(id) != null) {
+            return "0|" + game.getPlayer(id).getName();
+        }
+        Permanent perm = game.getPermanent(id);
+        if (perm != null) {
+            k.append("1|").append(perm.getName()).append('|').append(perm.isTapped() ? 1 : 0)
+                    .append('|').append(perm.getDamage()).append('|').append(perm.hasSummoningSickness() ? 1 : 0)
+                    .append('|').append(perm.getCounters(game).getTotalCount())
+                    .append('|').append(perm.getAttachments().size());
+            if (perm.isCreature(game)) {
+                k.append('|').append(perm.getPower().getValue()).append('/').append(perm.getToughness().getValue());
+            }
+            return k.toString();
+        }
+        StackObject so = game.getStack().getStackObject(id);
+        if (so != null) {
+            return "2|" + so.getName();
+        }
+        Card card = game.getCard(id);
+        if (card != null) {
+            Zone zone = game.getState().getZone(id);
+            return "3|" + (zone == null ? "" : zone.name()) + "|" + card.getName();
+        }
+        MageObject obj = game.getObject(id);
+        return "4|" + (obj == null ? "" : obj.getName());
+    }
+
+    /**
      * Whether an object is hidden from the opponent of its owner: a card in a hand, a library or outside
      * the game, or anything face down. Choices among such objects are private to the deciding player.
      */
@@ -409,6 +500,7 @@ public final class StateView {
                 o.addProperty("toughness", perm.getToughness().getValue());
             }
             o.addProperty("tapped", perm.isTapped());
+            o.add("keywords", masked ? new JsonArray() : keywords(game, perm));
             return o;
         }
         StackObject so = game.getStack().getStackObject(id);

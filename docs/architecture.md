@@ -40,21 +40,39 @@ frame fallback when offline.
 
 ## Deployment and access control
 
-`scripts/run_server.sh` binds to `127.0.0.1` and the server runs in **open** mode: anyone who can connect
-(i.e. local processes) may control agent/human seats, watch with both hands visible and stop games. That is
-the convenient setup for local research and exhibitions. Browsers are still held to same-origin requests and
-an open loopback server only answers to loopback host names, so web pages you visit can't drive it.
+The server runs in **tokens** mode by default, also on localhost: creating a game returns a 128-bit token
+per bridge seat and an owner token; a seat needs its token, revealing hands, stopping the game and downloading
+its full record need the owner token (or the API key). The web lobby and the Python runners keep the tokens
+for you. `--auth open` (for debugging and trusted exhibitions) lets anyone who can connect do all of that; an
+open server bound to loopback still only answers to loopback host names, and every server holds browsers to
+same-origin requests, so web pages you visit can't drive it.
 
-Binding to another address (`HOST=0.0.0.0`, the Docker image) switches to **tokens** mode: creating a game
-returns a 128-bit token per bridge seat and an owner token; a seat needs its token, revealing hands and
-stopping need the owner token (or the API key). Add `--api-key` (`COLOSSEO_API_KEY`) to restrict who can
-create games, `--max-games` to cap concurrent games (default 32) and `--cors-origin` for pages served
-elsewhere. Deck file paths are disabled in tokens mode (`--deck-paths on` to allow them). Tokens travel
-in URLs (WebSocket query strings, invitation links), so put a TLS-terminating proxy in front of a server on
-an untrusted network. `--auth open` on a public address is possible for trusted networks and logs a warning.
+`scripts/run_server.sh` binds to `127.0.0.1`; bind to another address (`HOST=0.0.0.0`, the Docker image) to
+accept other machines. Add `--api-key` (`COLOSSEO_API_KEY`) to restrict who can create games, `--max-games` to
+cap concurrent games (default 32) and `--cors-origin` for pages served elsewhere. Deck file paths are only
+accepted on a loopback server (`--deck-paths on|off`). Tokens travel in URLs (WebSocket query strings,
+invitation links), so put a TLS-terminating proxy in front of a server on an untrusted network.
 
-Benchmarks on a local open server should create games with `"require_tokens": true` (the token rules then
-apply to that game), so an agent can't attach to the other seat or watch with hands revealed.
+### Isolating agents
+
+Seat tokens keep agents apart only if they don't share a process or a filesystem with the server or each
+other: `run_game`/`run_match` run agents as threads of one Python process, and the server's `data/games`
+records contain both players' hidden information. To evaluate untrusted agents, run each one as its own
+process in its own sandbox (a container with a read-only filesystem, no access to the server's data
+directory, CPU/memory/time limits and network access only to the server's port) and connect it with
+`python -m colosseo agent <game_id> --seat N --token <seat token> --agent module:Class`; create the games
+(with `rated` / `time_bank_s` / limits as needed) from a separate coordinator that keeps the owner token.
+Hosted and remote agents then use exactly the same seat protocol. Give agents their own past games through
+per-seat record exports, never the raw records.
+
+### Reproducibility
+
+`scripts/build_xmage.sh` applies `scripts/xmage-patches` to XMage: `RandomUtil.setSeed` gives the calling
+thread (a game's thread) its own generator instead of reseeding the one shared by every game, the few
+unseeded `Collections.shuffle` calls use it, and a deck's cards keep their order when they become a library
+(XMage collected them into a hash set). The engine also lists options (actions, targets, attackers, blockers,
+mana sources) in a canonical order instead of XMage's id-hash order, and auto-pay considers mana sources in
+that order. Together, a seed reproduces a game between deterministic players.
 
 ## Adding decks and sets
 

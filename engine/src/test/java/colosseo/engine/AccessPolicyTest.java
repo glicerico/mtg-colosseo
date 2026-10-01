@@ -21,10 +21,12 @@ public class AccessPolicyTest {
     }
 
     @Test
-    public void defaultsDependOnBindAddress() {
+    public void tokensAreTheDefaultEverywhere() {
         AccessPolicy local = AccessPolicy.forBind("127.0.0.1", null, null, null, List.of(), List.of());
-        assertEquals(AccessPolicy.Mode.OPEN, local.mode);
+        assertEquals(AccessPolicy.Mode.TOKENS, local.mode);
         assertTrue(local.allowDeckPaths);
+        assertFalse(local.canControlSeat(config(false), "seat-secret", null));
+        assertFalse(local.canAdminister(config(false), "owner-secret", null));
         AccessPolicy remote = AccessPolicy.forBind("0.0.0.0", null, null, null, List.of(), List.of());
         assertEquals(AccessPolicy.Mode.TOKENS, remote.mode);
         assertFalse(remote.allowDeckPaths);
@@ -32,7 +34,7 @@ public class AccessPolicyTest {
 
     @Test
     public void openModeAllowsEverythingForUnprotectedGames() {
-        AccessPolicy p = AccessPolicy.forBind("localhost", null, null, null, List.of(), List.of());
+        AccessPolicy p = AccessPolicy.forBind("localhost", AccessPolicy.Mode.OPEN, null, null, List.of(), List.of());
         GameConfig c = config(false);
         assertTrue(p.canControlSeat(c, "seat-secret", null));
         assertTrue(p.canAdminister(c, "owner-secret", null));
@@ -55,7 +57,7 @@ public class AccessPolicyTest {
 
     @Test
     public void gamesCanOptIntoTokensOnAnOpenServer() {
-        AccessPolicy p = AccessPolicy.forBind("127.0.0.1", null, null, null, List.of(), List.of());
+        AccessPolicy p = AccessPolicy.forBind("127.0.0.1", AccessPolicy.Mode.OPEN, null, null, List.of(), List.of());
         GameConfig c = config(true);
         assertTrue(p.isProtected(c));
         assertFalse(p.canControlSeat(c, "seat-secret", null));
@@ -90,7 +92,7 @@ public class AccessPolicyTest {
 
     @Test
     public void openLoopbackServerRejectsForeignHostNames() {
-        AccessPolicy p = AccessPolicy.forBind("127.0.0.1", null, null, null, List.of(), List.of("mybox"));
+        AccessPolicy p = AccessPolicy.forBind("127.0.0.1", AccessPolicy.Mode.OPEN, null, null, List.of(), List.of("mybox"));
         assertTrue(p.hostAllowed("localhost:7070"));
         assertTrue(p.hostAllowed("127.0.0.1:7070"));
         assertTrue(p.hostAllowed("[::1]:7070"));

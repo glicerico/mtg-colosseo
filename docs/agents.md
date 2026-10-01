@@ -88,17 +88,38 @@ pass one). The plan is identical for any `parallel` value and is stored in `Matc
 result carries its `index`, `seed`, `starting_seat`, `a_seat`, `deck_a` and `deck_b`. Games come in pairs
 with the same decks and the starting player reversed, so use an even number of games; `swap_decks=True`
 makes blocks of four where the players also swap decks. Match games are created with
-`require_tokens=True`, so agents can't interfere with each other's seats even on an open local server.
+`require_tokens=True`, so agents can't interfere with each other's seats even on a `--auth open` server.
 
-What is *not* guaranteed is identical gameplay for the same seed: XMage draws from one process-wide RNG
-(concurrent games interleave their draws), the MAD AI's search is time-bounded, and agents may be
-non-deterministic themselves. A seed reproduces a game's shuffles and starting player reliably only when it
-runs alone on the server with deterministic players.
+A game's seed reproduces it: shuffles, the starting player, the order options are listed in, and with
+deterministic agents every decision - also when other games run at the same time (XMage is patched to give
+each game its own random generator, see `scripts/xmage-patches`). Not reproducible: XMage's own AI (its search
+is time-bounded and multi-threaded) and agents that are random or time-dependent themselves. Object ids differ
+between replays; compare games by names and positions, not ids.
+
+### Agent identity, strictness and ratings
+
+Set `name` and `version` on your agent class: records and ratings key on `agent_id` (`name@version`), and
+each record also stores a hash of the agent's source file (`agent_hash`), so results of different versions
+never mix. `run_match` is strict by default (`on_error="forfeit"`): an exception in `decide` concedes that
+game. Defaults the SDK or the engine substitute for an agent's own answer are marked as fallbacks
+(`"agent_error"`, `"rejected"`, `"timeout"`, `"illegal_repeat"`), counted per seat in each result
+(`players[i]["fallbacks"]`) and in `MatchResult.fallbacks_a/_b`. Pass `rated=True` (or `colosseo match --rated`)
+to put the games on the server's leaderboard.
+
+Per-game limits (game options): `max_decisions` (default 10000) and `max_record_mb` (100) stop runaway
+games as void (`status: "limit"`); `turn_limit_result="void"` makes reaching `max_turns` void instead of a
+draw; a seat's `time_bank_s` (in `seat_options`) is a chess clock - running out forfeits the game.
+
+When the engine refuses a whole declaration (e.g. a menace attacker blocked by a single creature), it asks again
+with `d.rejection` explaining why; `declare_blockers` decisions list each attacker's `min_blockers`, and every
+object in the observation carries its engine-derived `keywords` (`"flying"`, `"menace"`, `"ward {2}"`, ...).
+Repeating the same illegal declaration three times makes the engine declare no blocks (a fallback).
 
 Playing against your agent yourself: create a game with a `human` seat and an `agent` seat
 (`python -m colosseo play --agent human --opponent my_module:MyAgent` prints the invitation URL), or pick
 "External agent" in the lobby and connect with `colosseo.play(MyAgent(), game_id, seat=1, token=...)` (the
-game page shows the command with the seat token).
+game page shows the command with the seat token), or from a shell / container:
+`python -m colosseo agent <game_id> --seat 1 --token <seat token> --agent my_module:MyAgent`.
 
 ### Servers that require tokens
 
@@ -124,10 +145,14 @@ The opponent can also be an `Agent` (self-play: it runs in a background thread).
 
 ## Datasets
 
-Every game writes `data/games/<id>.jsonl` on the server: a `config` line, then alternating `decision`
-(the full message, including the observation) and `action` lines, then `result`. That is a complete
-(observation, legal options, chosen action) trace for both seats - convenient for behaviour cloning from
-XMage's AI or from human play.
+Every game writes `data/games/<id>.jsonl` on the server: a `config` line (with the engine, XMage, deck and
+agent versions), then alternating `decision` (the full message, including the observation) and `action`
+lines (plus `fallback` lines), then `result`. That is a complete (observation, legal options, chosen action)
+trace for both seats - convenient for behaviour cloning from XMage's AI or from human play.
+
+A full record contains both players' hidden information. To give an agent its own games, export one seat's
+view: `client.record(game_id, seat=0, token=seat_token)` or `python -m colosseo record <game_id> --seat 0 --token
+...` - its decisions and actions, the opponent's actions as public notices, the opponent's deck only as a hash.
 
 ## Other languages
 

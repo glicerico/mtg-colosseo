@@ -49,8 +49,10 @@ def _spec_name(spec: AgentSpec) -> str:
     if isinstance(spec, str):
         return spec
     if isinstance(spec, Agent):
-        return spec.name
-    return getattr(spec, "name", None) or getattr(spec, "__name__", "agent")
+        return spec.agent_id
+    name = getattr(spec, "name", None) or getattr(spec, "__name__", "agent")
+    version = getattr(spec, "version", "")
+    return f"{name}@{version}" if isinstance(name, str) and isinstance(version, str) and version else name
 
 
 def _seat(player: Union[Agent, str], deck: str, name: Optional[str]) -> Dict[str, Any]:
@@ -61,7 +63,9 @@ def _seat(player: Union[Agent, str], deck: str, name: Optional[str]) -> Dict[str
         if player == "human":
             return {"type": "human", "deck": deck, "name": name or "Human"}
         raise ValueError(f"unknown built-in player {player!r} (use 'xmage', 'xmage:N' or 'human')")
-    seat = {"type": "agent", "deck": deck, "name": name or player.name}
+    seat = {"type": "agent", "deck": deck, "name": name or player.name, "agent_id": player.agent_id}
+    if player.agent_hash:
+        seat["agent_hash"] = player.agent_hash
     seat.update(getattr(player, "seat_options", {}) or {})
     return seat
 
@@ -71,7 +75,7 @@ def run_game(player0: AgentSpec, player1: AgentSpec, deck0: str, deck1: Optional
              starting_seat: int = -1, max_turns: int = 60, pace_ms: int = 0, seed: Optional[int] = None,
              record: bool = True, title: Optional[str] = None, deadline_s: Optional[float] = None,
              reconnect_timeout: float = 60.0, client: Optional[ColosseoClient] = None,
-             on_created: Optional[Callable[[Dict[str, Any]], None]] = None,
+             on_created: Optional[Callable[[Dict[str, Any]], None]] = None, on_error: str = "default",
              **options: Any) -> GameResult:
     """Plays one game and returns its result.
 
@@ -79,7 +83,9 @@ def run_game(player0: AgentSpec, player1: AgentSpec, deck0: str, deck1: Optional
     Agent seats are driven from threads in this process; XMage seats run inside the server.
     ``seed`` and ``starting_seat`` are passed to the engine (the engine picks and records a seed when none
     is given). ``deadline_s`` stops the game server-side after that many seconds. Extra keyword arguments
-    are passed to the server as game options (e.g. ``require_tokens=True``).
+    are passed to the server as game options (e.g. ``require_tokens=True``, ``time_bank_s`` per seat via
+    ``seat_options``, ``max_decisions``, ``turn_limit_result``, ``rated``). ``on_error`` is passed to
+    :func:`~colosseo.play` (``"forfeit"`` makes an agent exception lose the game instead of playing a default).
 
     If the game can't be followed to its end (connection lost and not recovered), the server-side game is
     stopped and the returned result is unfinished (``status`` is not ``"finished"``; see
@@ -116,7 +122,8 @@ def run_game(player0: AgentSpec, player1: AgentSpec, deck0: str, deck1: Optional
 
             def work(a: Agent = player, i: int = index, tk: Optional[str] = token) -> None:
                 try:
-                    r = play(a, game_id, i, server, tk, reconnect_timeout=reconnect_timeout, client=client)
+                    r = play(a, game_id, i, server, tk, reconnect_timeout=reconnect_timeout, client=client,
+                             on_error=on_error)
                 except Exception as e:  # noqa: BLE001 - e.g. an exception from an agent hook
                     log.error("game %s: seat %s worker failed: %r", game_id, i, e)
                     r = {"status": "error", "error": f"seat {i} worker failed: {e!r}", "winner_seat": None,
@@ -283,6 +290,12 @@ class MatchResult:
     #: the match seed (generated when none was given, so the schedule can be reproduced)
     seed: Optional[int] = None
     schedule: List[ScheduledGame] = field(default_factory=list)
+    #: default actions substituted for a player's own answers (agent errors, rejected answers, timeouts)
+    fallbacks_a: int = 0
+    fallbacks_b: int = 0
+    #: games lost by forfeit (agent error in strict mode, time bank exhausted, concession)
+    forfeits_a: int = 0
+    forfeits_b: int = 0
 
     @property
     def played(self) -> int:
@@ -297,6 +310,18 @@ class MatchResult:
     def record(self, game: GameResult) -> None:
         """Adds a game result (with ``a_seat``) to the tallies."""
         self.games.append(game)
+        a_seat = game.get("a_seat")
+        for p in game.get("players") or []:
+            n = sum((p.get("fallbacks") or {}).values())
+            if p.get("seat") == a_seat:
+                self.fallbacks_a += n
+            else:
+                self.fallbacks_b += n
+        if game.get("forfeit_seat") is not None and is_terminal(game):
+            if game["forfeit_seat"] == a_seat:
+                self.forfeits_a += 1
+            else:
+                self.forfeits_b += 1
         kind = outcome(game)
         if kind == "unfinished":
             self.errors += 1
@@ -311,13 +336,15 @@ class MatchResult:
         return (f"{self.a} vs {self.b}: {self.wins_a}-{self.wins_b}"
                 + (f" ({self.draws} draws)" if self.draws else "")
                 + (f" [{self.errors} unfinished]" if self.errors else "")
+                + (f" [fallbacks {self.fallbacks_a}/{self.fallbacks_b}]" if self.fallbacks_a or self.fallbacks_b else "")
+                + (f" [forfeits {self.forfeits_a}/{self.forfeits_b}]" if self.forfeits_a or self.forfeits_b else "")
                 + f" over {self.played} games")
 
 
 def run_match(player_a: AgentSpec, player_b: AgentSpec, *, games: int = 10,
               decks: Union[str, Sequence[str], Sequence[Tuple[str, str]], None] = None,
               server: str = DEFAULT_SERVER, swap_seats: bool = True, swap_decks: bool = False, parallel: int = 1,
-              seed: Optional[int] = None, client: Optional[ColosseoClient] = None,
+              seed: Optional[int] = None, client: Optional[ColosseoClient] = None, on_error: str = "forfeit",
               **game_options: Any) -> MatchResult:
     """Plays a series of games following :func:`match_schedule`.
 
@@ -332,6 +359,9 @@ def run_match(player_a: AgentSpec, player_b: AgentSpec, *, games: int = 10,
 
     Match games are created with ``require_tokens=True`` (unless you pass ``require_tokens=False``): even on
     an open local server, an agent can then neither control nor watch the other seat with hands revealed.
+    Matches are strict by default (``on_error="forfeit"``): an exception in an agent loses that game instead
+    of being papered over with a default move. Default actions that still happen (rejected answers, timeouts)
+    are counted in ``fallbacks_a``/``fallbacks_b``; forfeits in ``forfeits_a``/``forfeits_b``.
     """
     game_options.setdefault("require_tokens", True)
     client = client or ColosseoClient(server)
@@ -355,7 +385,7 @@ def run_match(player_a: AgentSpec, player_b: AgentSpec, *, games: int = 10,
         try:
             result = run_game(players[0], players[1], seat_decks[0], seat_decks[1], server=server,
                               names=seat_names, seed=g.seed, starting_seat=g.starting_seat, client=client,
-                              **game_options)
+                              on_error=on_error, **game_options)
         except Exception as e:  # noqa: BLE001
             log.error("game %d failed: %s", g.index, e)
             result = {"status": "error", "error": str(e), "winner_seat": None, "draw": False}

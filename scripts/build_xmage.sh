@@ -26,6 +26,13 @@ if ! git cat-file -e "$XMAGE_REF^{commit}" 2>/dev/null; then
 fi
 git checkout -q --force "$XMAGE_REF"
 
+# Colosseo patches (scripts/xmage-patches): per-game random generator so that a game's seed decides its shuffles
+for PATCH in "$ROOT"/scripts/xmage-patches/*.patch; do
+    [ -e "$PATCH" ] || continue
+    echo ">> applying $(basename "$PATCH")"
+    git apply "$PATCH"
+done
+
 # keep only the modules we build in the aggregator pom
 sed -i.bak -E '/<module>(Mage\.Client|Mage\.Server|Mage\.Server\.Console|Mage\.Tests|Mage\.Verify|Mage\.Reports|Mage\.Plugins)<\/module>/d' pom.xml
 

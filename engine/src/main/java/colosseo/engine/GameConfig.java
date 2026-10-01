@@ -24,7 +24,11 @@ import java.util.List;
  *   "public_comments": false, // show agents' comments to the opponent and every spectator
  *   "require_tokens": false,  // require seat tokens even when the server runs in open mode
  *   "abandon_timeout_s": 600, // stop the game when a bridge seat stays disconnected this long (0 = never)
- *   "deadline_s": 0           // stop the game after this many seconds (0 = no deadline)
+ *   "deadline_s": 0,          // stop the game after this many seconds (0 = no deadline)
+ *   "max_decisions": 10000,   // stop the game (status "limit") after this many decisions (0 = no limit)
+ *   "max_record_mb": 100,     // stop the game (status "limit") when its record grows past this size
+ *   "turn_limit_result": "draw", // "draw" or "void" (status "turn_limit", not scored) at max_turns
+ *   "rated": false            // counts for the server's leaderboard
  * }
  * </pre>
  */
@@ -53,6 +57,18 @@ public final class GameConfig {
          * seconds before the default action is taken (0 = wait forever)
          */
         public double timeoutS = 0;
+        /**
+         * chess-clock style budget of thinking time for the whole game (0 = none); running out forfeits
+         */
+        public double timeBankS = 0;
+        /**
+         * who plays this seat, for records and ratings (e.g. "my-agent@1.2"; optional)
+         */
+        public String agentId;
+        /**
+         * content hash of the agent's code, if the client provides one
+         */
+        public String agentHash;
 
         public boolean isBridge() {
             return "human".equals(type) || "agent".equals(type);
@@ -76,6 +92,12 @@ public final class GameConfig {
             s.yieldAfterCast = Json.getBool(o, "yield_after_cast", human);
             s.autoPay = Json.getBool(o, "auto_pay", true);
             s.timeoutS = o.has("timeout_s") ? o.get("timeout_s").getAsDouble() : 0;
+            s.timeBankS = Math.max(0, o.has("time_bank_s") && !o.get("time_bank_s").isJsonNull() ? o.get("time_bank_s").getAsDouble() : 0);
+            s.agentId = Json.getString(o, "agent_id", null);
+            s.agentHash = Json.getString(o, "agent_hash", null);
+            if (s.agentId != null && (s.agentId.isBlank() || s.agentId.length() > 200)) {
+                throw new IllegalArgumentException("agent_id must be 1-200 characters");
+            }
             return s;
         }
 
@@ -95,6 +117,10 @@ public final class GameConfig {
             o.addProperty("name", name);
             o.addProperty("type", type);
             o.addProperty("deck", deck);
+            o.addProperty("agent_id", agentId());
+            if (agentHash != null) {
+                o.addProperty("agent_hash", agentHash);
+            }
             if (!isBridge()) {
                 o.addProperty("skill", skill);
             } else {
@@ -103,8 +129,19 @@ public final class GameConfig {
                 o.addProperty("yield_after_cast", yieldAfterCast);
                 o.addProperty("auto_pay", autoPay);
                 o.addProperty("timeout_s", timeoutS);
+                o.addProperty("time_bank_s", timeBankS);
             }
             return o;
+        }
+
+        /**
+         * Identity used in records and ratings: the declared agent_id, "xmage:N" for XMage's AI, or the name.
+         */
+        public String agentId() {
+            if (agentId != null) {
+                return agentId;
+            }
+            return "xmage".equals(type) ? "xmage:" + skill : type + ":" + name;
         }
     }
 
@@ -123,6 +160,10 @@ public final class GameConfig {
      */
     public Double abandonTimeoutS;
     public double deadlineS = 0;
+    public int maxDecisions = 10000;
+    public double maxRecordMb = 100;
+    public String turnLimitResult = "draw";
+    public boolean rated = false;
 
     public static GameConfig parse(JsonObject o) {
         GameConfig c = new GameConfig();
@@ -155,6 +196,13 @@ public final class GameConfig {
             c.abandonTimeoutS = Math.max(0, o.get("abandon_timeout_s").getAsDouble());
         }
         c.deadlineS = o.has("deadline_s") && !o.get("deadline_s").isJsonNull() ? Math.max(0, o.get("deadline_s").getAsDouble()) : 0;
+        c.maxDecisions = Math.max(0, Json.getInt(o, "max_decisions", 10000));
+        c.maxRecordMb = o.has("max_record_mb") && !o.get("max_record_mb").isJsonNull() ? Math.max(0, o.get("max_record_mb").getAsDouble()) : 100;
+        c.turnLimitResult = Json.getString(o, "turn_limit_result", "draw");
+        if (!c.turnLimitResult.equals("draw") && !c.turnLimitResult.equals("void")) {
+            throw new IllegalArgumentException("turn_limit_result must be 'draw' or 'void'");
+        }
+        c.rated = Json.getBool(o, "rated", false);
         return c;
     }
 
@@ -178,6 +226,10 @@ public final class GameConfig {
         o.addProperty("require_tokens", requireTokens);
         o.addProperty("abandon_timeout_s", abandonTimeoutS);
         o.addProperty("deadline_s", deadlineS);
+        o.addProperty("max_decisions", maxDecisions);
+        o.addProperty("max_record_mb", maxRecordMb);
+        o.addProperty("turn_limit_result", turnLimitResult);
+        o.addProperty("rated", rated);
         return o;
     }
 }

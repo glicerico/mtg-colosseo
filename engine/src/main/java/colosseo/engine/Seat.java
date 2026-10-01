@@ -31,6 +31,10 @@ public final class Seat {
 
     Player player;
     UUID playerId;
+    /**
+     * hash and card list of the deck this seat plays (see DeckLibrary.fingerprint)
+     */
+    JsonObject deckFingerprint;
 
     final AtomicReference<Decision> pending = new AtomicReference<>();
     final List<Connection> connections = new CopyOnWriteArrayList<>();
@@ -39,6 +43,40 @@ public final class Seat {
     private int logCursor = 0;
     String lastDecisionKey;
     int repeatCount;
+
+    /**
+     * Fallback actions (defaults applied instead of the seat's own answer), by reason.
+     */
+    final java.util.Map<String, Integer> fallbacks = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * Thinking time used so far (time bank), and when the pending decision was published.
+     */
+    volatile double clockUsedS;
+    volatile long askedAtMs;
+    private volatile ScheduledFuture<?> clockTask;
+
+    void countFallback(String reason) {
+        fallbacks.merge(reason, 1, Integer::sum);
+    }
+
+    JsonObject fallbacksJson() {
+        JsonObject o = new JsonObject();
+        fallbacks.forEach(o::addProperty);
+        return o;
+    }
+
+    void scheduleClock(Runnable onExpiry, double remainingS) {
+        cancelClock();
+        clockTask = session.timers().schedule(onExpiry, Math.max(0, (long) (remainingS * 1000)), TimeUnit.MILLISECONDS);
+    }
+
+    void cancelClock() {
+        ScheduledFuture<?> t = clockTask;
+        if (t != null) {
+            t.cancel(false);
+            clockTask = null;
+        }
+    }
 
     /**
      * Last time a client was attached (for abandoned-game detection).
@@ -174,6 +212,7 @@ public final class Seat {
                 JsonObject action = d.defaultAction.deepCopy();
                 action.addProperty("decision_id", d.id);
                 action.addProperty("comment", "timeout: default action");
+                action.addProperty("fallback", "timeout");
                 session.submit(this, action, null);
             }
         }, ms, TimeUnit.MILLISECONDS);

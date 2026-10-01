@@ -48,6 +48,8 @@ def card_line(c: Dict[str, Any], rules: bool = True, short_ids: bool = False) ->
         text += f" ({types}{_pt(c)})"
     if flags:
         text += " [" + ", ".join(flags) + "]"
+    if c.get("keywords"):
+        text += " {" + ", ".join(c["keywords"]) + "}"
     if rules and c.get("rules"):
         text += " -- " + " / ".join(c["rules"])
     return text
@@ -141,7 +143,10 @@ def render_decision(decision: Decision, short_ids: bool = False) -> str:
     if decision.kind == "declare_blockers":
         lines.append("Attacking creatures:")
         for a in raw.get("attackers", []):
-            lines.append(f"  {_id(a['id'], short_ids)}: {a.get('name')} {a.get('power')}/{a.get('toughness')}")
+            need = a.get("min_blockers") or 1
+            kw = f" {{{', '.join(a['keywords'])}}}" if a.get("keywords") else ""
+            lines.append(f"  {_id(a['id'], short_ids)}: {a.get('name')} {a.get('power')}/{a.get('toughness')}{kw}"
+                         + (f" -- can only be blocked by {need} or more creatures" if need > 1 else ""))
         lines.append("Your possible blockers (id: name -> attackers it can block):")
         for b in raw.get("blockers", []):
             lines.append(f"  {_id(b['id'], short_ids)}: {b.get('name')} {b.get('power')}/{b.get('toughness')}"

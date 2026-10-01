@@ -1,0 +1,86 @@
+diff --git a/Mage/src/main/java/mage/cards/decks/Deck.java b/Mage/src/main/java/mage/cards/decks/Deck.java
+index 846a834e50..a4824b1f88 100644
+--- a/Mage/src/main/java/mage/cards/decks/Deck.java
++++ b/Mage/src/main/java/mage/cards/decks/Deck.java
+@@ -213,7 +213,7 @@ public class Deck implements Serializable, Copyable<Deck> {
+         return cards
+                 .stream()
+                 .filter(card -> !card.isExtraDeckCard())
+-                .collect(Collectors.toSet());
++                .collect(Collectors.toCollection(LinkedHashSet::new)); // MTG Colosseo patch: deck order, not hash order
+     }
+ 
+     public Card findCard(UUID cardId) {
+diff --git a/Mage/src/main/java/mage/players/PlayerImpl.java b/Mage/src/main/java/mage/players/PlayerImpl.java
+index 22f49e0107..93969e7a4f 100644
+--- a/Mage/src/main/java/mage/players/PlayerImpl.java
++++ b/Mage/src/main/java/mage/players/PlayerImpl.java
+@@ -1059,7 +1059,7 @@ public abstract class PlayerImpl implements Player, Serializable {
+             if (!anyOrder) {
+                 // random order
+                 List<UUID> ids = new ArrayList<>(cards);
+-                Collections.shuffle(ids);
++                Collections.shuffle(ids, RandomUtil.getRandom());
+                 for (UUID id : ids) {
+                     moveObjectToLibrary(id, source, game, false);
+                 }
+@@ -1202,7 +1202,7 @@ public abstract class PlayerImpl implements Player, Serializable {
+             if (!anyOrder) {
+                 // random order
+                 List<UUID> ids = new ArrayList<>(cards);
+-                Collections.shuffle(ids);
++                Collections.shuffle(ids, RandomUtil.getRandom());
+                 for (UUID id : ids) {
+                     moveObjectToLibrary(id, source, game, true);
+                 }
+diff --git a/Mage/src/main/java/mage/util/RandomUtil.java b/Mage/src/main/java/mage/util/RandomUtil.java
+index b042486345..0434400909 100644
+--- a/Mage/src/main/java/mage/util/RandomUtil.java
++++ b/Mage/src/main/java/mage/util/RandomUtil.java
+@@ -13,27 +13,32 @@ public final class RandomUtil {
+ 
+     private static final Random random = new Random(); // thread safe with seed support
+ 
++    // MTG Colosseo patch: setSeed() gives the calling thread (a game's thread) its own generator, so a game's
++    // seed decides its shuffles no matter what other games or AI threads draw; unseeded threads share `random`
++    private static final ThreadLocal<Random> seeded = new ThreadLocal<>();
++
+     private RandomUtil() {
+     }
+ 
+     public static Random getRandom() {
+-        return random;
++        Random r = seeded.get();
++        return r != null ? r : random;
+     }
+ 
+     public static int nextInt() {
+-        return random.nextInt();
++        return getRandom().nextInt();
+     }
+ 
+     public static int nextInt(int max) {
+-        return random.nextInt(max);
++        return getRandom().nextInt(max);
+     }
+ 
+     public static boolean nextBoolean() {
+-        return random.nextBoolean();
++        return getRandom().nextBoolean();
+     }
+ 
+     public static double nextDouble() {
+-        return random.nextDouble();
++        return getRandom().nextDouble();
+     }
+ 
+     public static Color nextColor() {
+@@ -41,7 +46,7 @@ public final class RandomUtil {
+     }
+ 
+     public static void setSeed(long newSeed) {
+-        random.setSeed(newSeed);
++        seeded.set(new Random(newSeed));
+     }
+ 
+     public static <T> T randomFromCollection(Collection<T> collection) {

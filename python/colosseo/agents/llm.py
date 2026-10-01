@@ -68,6 +68,7 @@ class ClaudeAgent(Agent):
             client = anthropic.Anthropic()
         self.client = client
         self.model = model
+        self.version = f"{model}/{effort}"  # ratings keep models and settings apart
         self.effort = effort
         self.fallback = fallback or HeuristicAgent()
         self.trivial_to_fallback = trivial_to_fallback

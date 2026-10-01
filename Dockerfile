@@ -1,16 +1,19 @@
 # MTG Colosseo server: XMage rules engine + web UI + agent API on port 7070
 #   docker build -t mtg-colosseo .
 #   docker run -p 7070:7070 -v colosseo-data:/app/data mtg-colosseo
-# The container listens on all interfaces, so the server runs in token mode: seats need their tokens,
-# revealing hands and stopping games need the owner token. Add -e COLOSSEO_API_KEY=... to restrict who
-# can create games, or -e COLOSSEO_ARGS="--auth open" for a trusted, local-only setup.
+# Seats need their tokens, revealing hands and stopping games need the owner token. Add
+# -e COLOSSEO_API_KEY=... to restrict who can create games, or -e COLOSSEO_ARGS="--auth open" for a trusted,
+# local-only setup.
 FROM maven:3.9-eclipse-temurin-21 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY scripts/build_xmage.sh scripts/
+COPY scripts/xmage-patches scripts/xmage-patches
 RUN XMAGE_DIR=/src/.xmage scripts/build_xmage.sh && rm -rf /src/.xmage
 COPY engine engine
-RUN cd engine && mvn -B -q package
+# recorded in every game record: docker build --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) .
+ARG SOURCE_COMMIT=unknown
+RUN cd engine && mvn -B -q package -Dsource.commit=$SOURCE_COMMIT
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app

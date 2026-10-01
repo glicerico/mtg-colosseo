@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Starts the Colosseo server (web UI + agent API) on http://localhost:${PORT:-7070}
 #   PORT=7070 JAVA_OPTS=-Xmx4g scripts/run_server.sh [extra engine args]
-# By default the server only listens on 127.0.0.1 and runs in open (trusted local) mode. To accept other
-# machines, bind to all interfaces; tokens are then required (see --help and docs/architecture.md):
+# By default the server only listens on 127.0.0.1 and protects every game with per-game tokens (--auth open
+# disables that for debugging). To accept other machines, bind to all interfaces (see docs/architecture.md):
 #   HOST=0.0.0.0 COLOSSEO_API_KEY=... scripts/run_server.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

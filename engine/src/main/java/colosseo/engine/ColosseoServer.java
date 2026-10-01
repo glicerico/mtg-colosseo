@@ -66,13 +66,13 @@ public final class ColosseoServer {
             "usage: colosseo-engine [options]",
             "  --port N               HTTP port (default 7070)",
             "  --host ADDR            bind address (default 127.0.0.1; use 0.0.0.0 to accept remote clients)",
-            "  --auth open|tokens     open: anyone who can connect may control seats, reveal hands and stop games",
-            "                         tokens: seat tokens / owner tokens required (default unless bound to loopback)",
+            "  --auth tokens|open     tokens (default): seat tokens / owner tokens required",
+            "                         open: anyone who can connect may control seats, reveal hands and stop games",
             "  --require-tokens       same as --auth tokens",
             "  --api-key KEY          require KEY to create games (also a master key); env COLOSSEO_API_KEY",
             "  --cors-origin ORIGIN   allow browser pages from ORIGIN (repeatable, comma separated, * = any)",
             "  --allowed-host NAME    extra Host name accepted by an open loopback server (repeatable)",
-            "  --deck-paths on|off    allow decks given as server file paths (default: on in open mode only)",
+            "  --deck-paths on|off    allow decks given as server file paths (default: on when bound to loopback)",
             "  --max-games N          maximum running games (default 32, 0 = unlimited)",
             "  --abandon-timeout S    stop a game when a bridge seat stays disconnected S seconds (default 600, 0 = never)",
             "  --web DIR --decks DIR --data DIR --verbose",
@@ -162,9 +162,9 @@ public final class ColosseoServer {
         GameManager manager = new GameManager(deckLibrary, data.toAbsolutePath(), Math.max(0, maxGames), Math.max(0, abandonTimeout));
         ColosseoServer server = new ColosseoServer(manager, policy);
         server.start(host, port, web);
-        if (policy.mode == AccessPolicy.Mode.OPEN && !AccessPolicy.isLoopback(host)) {
-            LOG.warn("open auth mode on a non-loopback address: anyone who can reach this server can control seats, "
-                    + "see both hands and stop games");
+        if (policy.mode == AccessPolicy.Mode.OPEN) {
+            LOG.warn("open auth mode: anyone who can reach this server can control seats, see both hands and stop games"
+                    + (AccessPolicy.isLoopback(host) ? " (local processes only)" : ""));
         }
     }
 
@@ -336,6 +336,11 @@ public final class ColosseoServer {
                 return;
             }
             GameConfig config = GameConfig.parse(Json.parse(ctx.body()));
+            if (config.rated && !policy.isProtected(config)) {
+                // a rated seat must not be playable or watchable by anyone but its agent
+                error(ctx, 400, "rated games must be protected by tokens (set \"require_tokens\": true)");
+                return;
+            }
             GameSession session;
             try {
                 session = manager.create(config);
@@ -377,6 +382,49 @@ public final class ColosseoServer {
                 return;
             }
             json(ctx, gameJson(session));
+        });
+
+        app.get("/api/leaderboard", ctx -> json(ctx, manager.leaderboard().table()));
+
+        // game records: ?seat=N gives what that seat could see (seat token or owner token); the full record,
+        // with both players' observations, needs the owner token
+        app.get("/api/games/{id}/record", ctx -> {
+            GameSession session = manager.get(ctx.pathParam("id"));
+            if (session == null) {
+                error(ctx, 404, "unknown game");
+                return;
+            }
+            String seatParam = ctx.queryParam("seat");
+            Integer seatIndex = null;
+            String cred = credential(ctx);
+            boolean admin = policy.canAdminister(session.config, session.ownerToken, cred);
+            if (seatParam != null) {
+                Seat seat;
+                try {
+                    seat = session.seat(Integer.parseInt(seatParam));
+                } catch (NumberFormatException e) {
+                    seat = null;
+                }
+                if (seat == null) {
+                    error(ctx, 400, "unknown seat " + seatParam);
+                    return;
+                }
+                if (!admin && !(seat.config().isBridge() && policy.canControlSeat(session.config, seat.token, cred))) {
+                    error(ctx, 403, "this seat's record needs its seat token or the owner token");
+                    return;
+                }
+                seatIndex = seat.index;
+            } else if (!admin) {
+                error(ctx, 403, "the full record (both players' views) needs the owner token; add ?seat=N for one seat's view");
+                return;
+            }
+            Path file = Records.file(manager.dataDir(), session.id);
+            if (!Files.isRegularFile(file)) {
+                error(ctx, 404, "no record for this game (created with \"record\": false?)");
+                return;
+            }
+            ctx.contentType("application/x-ndjson");
+            ctx.result(String.join("\n", Records.read(file, seatIndex)) + "\n");
         });
 
         app.post("/api/games/{id}/terminate", ctx -> {
@@ -496,7 +544,12 @@ public final class ColosseoServer {
                     c.sendError("spectators can't concede", null);
                     return;
                 }
-                session.concede(seat);
+                // "reason": "agent_error" lets an SDK forfeit on behalf of a crashed agent (strict mode)
+                if ("agent_error".equals(Json.getString(msg, "reason", null))) {
+                    session.forfeit(seat, "agent_error", "forfeits: agent error");
+                } else {
+                    session.concede(seat);
+                }
                 break;
             case "settings":
                 if (seat == null) {

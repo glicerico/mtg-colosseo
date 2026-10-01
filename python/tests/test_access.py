@@ -1,7 +1,7 @@
 """Hidden information, access control and game lifecycle against a running server.
 
-The server under test is expected to run in its default local mode (``--auth open``); games created with
-``require_tokens`` get the same protection a ``--auth tokens`` server gives every game.
+Works against a server in its default token mode as well as with ``--auth open`` (games created with
+``require_tokens`` get the token rules either way).
 """
 import threading
 import time

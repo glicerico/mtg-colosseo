@@ -1,5 +1,5 @@
 // Hash router for the single page app.
-import { renderLobby, renderDecks, renderAgents } from './lobby.js';
+import { renderLobby, renderDecks, renderAgents, renderLeaderboard } from './lobby.js';
 import { GameView } from './game.js';
 import { rememberToken } from './api.js';
 import { closeAllModals } from './ui.js';
@@ -30,6 +30,8 @@ function route() {
     current = new GameView(app, game, seat);
   } else if (parts[0] === 'decks') {
     current = renderDecks(app);
+  } else if (parts[0] === 'leaderboard') {
+    current = renderLeaderboard(app);
   } else if (parts[0] === 'agents') {
     current = renderAgents(app);
   } else {
