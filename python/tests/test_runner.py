@@ -51,6 +51,8 @@ class FakeClient:
 
     def connect_seat(self, game_id, seat, token=None):
         self.connects += 1
+        if self.connects > 30:
+            raise ColosseoError("test guard: too many connections")  # so a regression fails instead of hanging
         if not self.connections and self.connection_factory:
             return self.connection_factory()
         if not self.connections:
@@ -235,6 +237,50 @@ def test_connections_without_progress_still_exhaust_the_window(clock):
     assert agent.ended == [result]
 
 
+def test_replayed_decision_with_failing_sends_exhausts_the_window(raw_decisions, clock):
+    """PR 3 review R4: a connection that replays our pending decision and dies on the resend is no progress."""
+    d = decision_msg(raw_decisions["priority"], 21)
+    first = FakeConn([{"type": "hello", "game": RUNNING}, d], send_error=ConnectionError("reset"))
+    client = FakeClient([first], [RUNNING], connection_factory=lambda: FakeConn(
+        [{"type": "hello", "game": RUNNING}, d], send_error=ConnectionError("reset")))
+    agent = CountingAgent()
+    result = play(agent, "g1", 0, client=client, reconnect_timeout=2)
+    assert result["status"] == "interrupted"
+    assert client.connects < 15 and clock.now <= 3
+    assert agent.decided == [21]
+    assert agent.ended == [result]
+
+
+def test_replayed_log_and_errors_are_not_progress(raw_decisions, clock):
+    log0 = {"type": "log", "entry": {"i": 0, "turn": 1, "text": "Game has started"}}
+    hello = {"type": "hello", "game": RUNNING, "log": [log0["entry"]]}
+    stale = {"type": "error", "decision_id": 3, "code": "stale", "message": "decision 3 was already answered"}
+    client = FakeClient([], [RUNNING], connection_factory=lambda: FakeConn(
+        [hello, log0, stale, {"type": "state", "state": {}}]))
+    result = play(CountingAgent(), "g1", 0, client=client, reconnect_timeout=2)
+    assert result["status"] == "interrupted" and client.connects < 15
+
+
+def test_acknowledged_resend_counts_as_progress(raw_decisions, clock):
+    """After a successful resend the server accepts the action: a later outage gets a fresh window."""
+    d = decision_msg(raw_decisions["priority"], 31)
+    ack = {"type": "action", "seat": 0, "decision_id": 31, "kind": "priority", "summary": "Pass priority"}
+
+    def later():
+        clock.now += 20
+    conns = [
+        FakeConn([{"type": "hello", "game": RUNNING}, d], send_error=ConnectionError("reset")),
+        FakeConn([{"type": "hello", "game": RUNNING}, d, ack, later]),
+        FakeConn([{"type": "hello", "game": RUNNING}, {"type": "game_over", "result": FINISHED}]),
+    ]
+    client = FakeClient(conns, [RUNNING])
+    agent = CountingAgent()
+    result = play(agent, "g1", 0, client=client, reconnect_timeout=5)
+    assert result == FINISHED and client.connects == 3
+    assert [m["decision_id"] for m in conns[1].sent] == [31]  # the cached answer, re-sent
+    assert agent.decided == [31] and agent.ended == [FINISHED]
+
+
 # --- run_game cleanup ----------------------------------------------------------------------------
 
 class GameClient:
@@ -306,6 +352,62 @@ def test_game_that_finished_meanwhile_is_kept(monkeypatch):
     result = runner.run_game(CountingAgent(), CountingAgent(), "d", client=server, reconnect_timeout=5)
     assert server.terminated == []
     assert {k: result[k] for k in FINISHED} == FINISHED and result["game_id"] == "g1"
+
+
+class RacingClient(GameClient):
+    """The game is running when checked, then ends (finished or stopped) by the time terminate() answers."""
+
+    def __init__(self, terminate_reply, later=None):
+        super().__init__()
+        self.terminate_reply = terminate_reply
+        self.later = later or []
+
+    def game(self, game_id):
+        if self.terminated and self.later:
+            return self.later.pop(0) if len(self.later) > 1 else self.later[0]
+        return dict(RUNNING)
+
+    def terminate(self, game_id, token=None):
+        self.terminated.append(token)
+        return self.terminate_reply
+
+
+def _interrupted_vs_xmage(monkeypatch, client):
+    monkeypatch.setattr(runner, "play", lambda *a, **k: {"status": "interrupted", "winner_seat": None, "draw": False,
+                                                         "error": "transport lost"})
+    monkeypatch.setattr(runner.time, "sleep", lambda s: None)
+    return runner.run_game(CountingAgent(), "xmage", "d", client=client, reconnect_timeout=5)
+
+
+def test_game_finishing_during_termination_keeps_its_result(monkeypatch):
+    """PR 3 review R5: the stop request arrives after the game already ended on its own."""
+    won = {"status": "finished", "winner_seat": 1, "winner": "XMage", "draw": False}
+    client = RacingClient({"status": "finished", "result": won})
+    result = _interrupted_vs_xmage(monkeypatch, client)
+    assert result["status"] == "finished" and result["winner_seat"] == 1
+    assert "server_status" not in result and outcome(result) == "win"
+
+
+def test_terminated_game_stays_unfinished(monkeypatch):
+    stopped = {"status": "terminated", "winner_seat": None, "draw": False, "error": "terminated"}
+    client = RacingClient({"status": "terminated", "result": stopped})
+    result = _interrupted_vs_xmage(monkeypatch, client)
+    assert result["status"] == "interrupted" and result["server_status"] == "terminated"
+    assert outcome(result) == "unfinished"
+
+
+def test_inconclusive_stop_is_reconciled_without_claiming_success(monkeypatch):
+    # the stop response comes back before the game thread ended; a later status check has the result
+    draw = {"status": "finished", "winner_seat": None, "winner": None, "draw": True, "reason": "turn_limit"}
+    client = RacingClient(dict(RUNNING), later=[dict(RUNNING), {"status": "finished", "result": draw}])
+    result = _interrupted_vs_xmage(monkeypatch, client)
+    assert result["status"] == "finished" and result["draw"] is True
+    # and if it never settles, the runner says so instead of assuming the stop worked
+    clock = iter(range(0, 1000, 3))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+    never = RacingClient(dict(RUNNING), later=[dict(RUNNING)])
+    result = _interrupted_vs_xmage(monkeypatch, never)
+    assert result["status"] == "interrupted" and result["server_status"] == "stop_requested"
 
 
 # --- scoring -----------------------------------------------------------------------------------

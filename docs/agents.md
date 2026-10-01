@@ -69,12 +69,14 @@ agents; don't use the same instance for both seats of one game).
 Only games the rules engine finished are scored. `colosseo.outcome(result)` returns `"win"`, `"draw"` or
 `"unfinished"`; a draw needs an explicit `draw: true` from a finished game (turn limit, both players losing).
 If an agent's connection drops (while waiting or while sending an answer), `play()` reconnects for up to
-`reconnect_timeout` seconds (60 by default; every separate outage gets a fresh window once the game has
-moved on) and re-sends an answer that may have been lost; a game that ended meanwhile is reported once,
+`reconnect_timeout` seconds (60 by default; a later outage gets a fresh window only if the game visibly
+moved on in between - a new decision, an accepted action or a new log entry, not a replay of the pending
+decision) and re-sends an answer that may have been lost; a game that ended meanwhile is reported once,
 with its real result. If the game can't be recovered the result has `status: "interrupted"`. As soon as
 one seat ends unfinished (or its worker crashes), `run_game` checks the server: a game that finished after
-all keeps its real result, otherwise the server game is stopped right away so the other seat isn't left
-waiting. `run_match` counts unfinished games in `errors` - never as draws, and they never change Elo.
+all - even one that ends just as the stop request arrives - keeps its real result, otherwise the server game
+is stopped right away so the other seat isn't left waiting (if the stop can't be confirmed, the result says
+`server_status: "stop_requested"`). `run_match` counts unfinished games in `errors` - never as draws, and they never change Elo.
 Server-side, games whose agent/human seat stays disconnected for `abandon_timeout_s` (600 s by default) are
 stopped with `status: "abandoned"`; `deadline_s` bounds a game's wall-clock time.
 
