@@ -50,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/mage
-          key: xmage-${{ hashFiles('scripts/build_xmage.sh') }}
+          key: xmage-${{ hashFiles('scripts/build_xmage.sh', 'scripts/xmage-patches/**') }}
       - name: Build XMage
         if: steps.xmage-cache.outputs.cache-hit != 'true'
         env:
@@ -58,7 +58,7 @@ jobs:
           XMAGE_DIR: ${{ runner.temp }}/xmage
         run: scripts/build_xmage.sh
       - name: Build the engine (runs the engine unit tests)
-        run: cd engine && mvn -B package
+        run: cd engine && mvn -B package -Dsource.commit=${{ github.sha }}
       - name: Start the server
         run: |
           mkdir -p data

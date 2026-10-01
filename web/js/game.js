@@ -332,6 +332,8 @@ export class GameView {
     if (r.status === 'terminated') title = 'Game stopped';
     else if (r.status === 'abandoned') title = 'Game abandoned';
     else if (r.status === 'timeout') title = 'Game timed out';
+    else if (r.status === 'limit') title = 'Game stopped (limit reached)';
+    else if (r.status === 'turn_limit') title = 'Turn limit reached (void)';
     else if (r.error) title = 'Game ended with an error';
     else if (r.winner_seat === null || r.winner_seat === undefined) title = 'Draw';
     else if (this.isPlayer) title = r.winner_seat === this.seat ? 'Victory!' : 'Defeat';
@@ -339,7 +341,8 @@ export class GameView {
     modal(title, h('div', { class: 'result' },
       h('p', {}, `${r.turns || 0} turns · ${r.decisions || 0} decisions · ${Math.round(r.duration_s || 0)} s`),
       (r.players || []).map((p) => h('div', {}, `${p.name} (${p.type}) — life ${p.life}${p.won ? ' — winner' : ''}`)),
-      r.reason && r.reason !== r.error ? h('p', { class: 'muted' }, r.reason) : null,
+      r.reason === 'forfeit' ? h('p', { class: 'muted' }, `${this.seatName(r.forfeit_seat)} forfeited (${({ time: 'out of time', agent_error: 'agent error', concede: 'conceded' })[r.forfeit_reason] || r.forfeit_reason})`)
+        : r.reason && r.reason !== r.error ? h('p', { class: 'muted' }, r.reason) : null,
       r.error ? h('p', { class: 'error' }, r.error) : null),
     [{ label: 'View board' }, { label: 'Back to lobby', cls: 'primary', onClick: () => { location.hash = '#/'; } }]);
   }
@@ -625,7 +628,15 @@ export class GameView {
     }
     bar.className = 'prompt-bar active';
     const text = h('span', { class: 'prompt-text' }, d.prompt);
+    if (d.rejection && d.rejection !== d.error) text.appendChild(h('div', { class: 'error' }, d.rejection));
     if (d.error) text.appendChild(h('div', { class: 'error' }, d.error));
+    if (d.kind === 'declare_blockers') {
+      const needy = (d.attackers || []).filter((a) => (a.min_blockers || 1) > 1);
+      if (needy.length) {
+        text.appendChild(h('div', { class: 'muted' },
+          needy.map((a) => `${a.name} needs ${a.min_blockers}+ blockers`).join(' · ')));
+      }
+    }
     const buttons = [];
     const btn = (label, fn, cls = '') => buttons.push(h('button', { class: 'btn ' + cls, onclick: fn }, label));
     switch (d.kind) {

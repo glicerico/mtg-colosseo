@@ -16,6 +16,7 @@ class RandomAgent(Agent):
     """
 
     name = "random"
+    version = "1"
 
     def __init__(self, seed: Optional[int] = None, act_probability: float = 0.8, attack_probability: float = 0.5):
         self.rng = random.Random(seed)

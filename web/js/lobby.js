@@ -1,5 +1,5 @@
 // Lobby (create/watch games), deck browser and agent connection guide.
-import { getDecks, getSets, getGames, createGame, terminateGame, getHealth, apiKey, setApiKey, seatToken, ownerToken } from './api.js';
+import { getDecks, getSets, getGames, createGame, terminateGame, getHealth, getLeaderboard, apiKey, setApiKey, seatToken, ownerToken } from './api.js';
 import { h, toast, colorPips, manaSymbols } from './ui.js';
 import { settings, setImages, showPreview, hidePreview } from './cards.js';
 
@@ -243,6 +243,33 @@ export function renderDecks(app) {
   return null;
 }
 
+// --- leaderboard --------------------------------------------------------------------------------
+
+export function renderLeaderboard(app) {
+  app.className = 'page';
+  const body = h('div', {}, 'Loading…');
+  app.append(h('h1', {}, 'Leaderboard'),
+    h('p', { class: 'muted' }, 'Elo over the server’s rated games, by agent identity (name@version). Only games the rules engine ',
+      'finished are scored; stopped, abandoned or void games are counted as unfinished and never move ratings. ',
+      'Rated games come from ', h('code', {}, 'run_match(..., rated=True)'), ' or ', h('code', {}, 'colosseo match --rated'), '.'),
+    body);
+  getLeaderboard().then((board) => {
+    const rows = board.ratings || [];
+    if (!rows.length) {
+      body.replaceChildren(h('p', { class: 'muted' }, 'No rated games yet.'));
+      return;
+    }
+    body.replaceChildren(h('p', { class: 'muted' }, `${board.rated_games} rated games · K=${board.k}`),
+      h('table', { class: 'games leaderboard' },
+        h('tr', {}, ['#', 'Agent', 'Elo', 'Games', 'W', 'L', 'D', 'Unfinished', 'Fallbacks', 'Forfeits'].map((t) => h('th', {}, t))),
+        rows.map((r, i) => h('tr', {},
+          h('td', {}, i + 1), h('td', { class: 'mono' }, r.agent_id), h('td', {}, r.rating.toFixed(1)),
+          h('td', {}, r.games), h('td', {}, r.wins), h('td', {}, r.losses), h('td', {}, r.draws),
+          h('td', {}, r.unfinished), h('td', {}, r.fallbacks), h('td', {}, r.forfeits)))));
+  }).catch((e) => body.replaceChildren(h('p', { class: 'error' }, e.message)));
+  return null;
+}
+
 // --- agent guide ------------------------------------------------------------------------------
 
 export function renderAgents(app) {
@@ -280,10 +307,13 @@ python -m colosseo --server ${origin} tournament random heuristic xmage:1 --game
 from colosseo.agents import HeuristicAgent
 play(HeuristicAgent(), game_id="<id shown in the game>", seat=1, server="${origin}", token="<seat token>")`),
     h('h2', {}, 'Access control'),
-    h('p', {}, 'Creating a game returns a token per agent/human seat and an owner token. A server bound to localhost runs ',
-      'in open mode (tokens optional); any other server, or a game created with ', h('code', {}, '"require_tokens": true'),
-      ', requires the seat token to control a seat and the owner token to show both hands or stop the game. ',
+    h('p', {}, 'Creating a game returns a token per agent/human seat and an owner token. The seat token is required to ',
+      'control a seat and the owner token to show both hands, stop the game or download its full record (servers ',
+      'started with ', h('code', {}, '--auth open'), ' skip this for local debugging). ',
       'Opponents and ordinary spectators never see cards picked from hidden zones nor agents’ comments.'),
+    h('p', {}, 'To isolate an agent, run it as its own process (ideally in its own container) that only reaches the ',
+      'server’s WebSocket with its seat token:'),
+    code(`python -m colosseo --server ${origin} agent <game_id> --seat 1 --token <seat token> --agent my_pkg.agents:MyAgent`),
     h('h2', {}, 'Raw protocol'),
     code(`POST ${origin}/api/games
 {"seats": [{"type": "agent", "deck": "fdn:azorius-skies"},

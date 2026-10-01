@@ -98,6 +98,7 @@ export const getDeck = (id) => api('/api/decks/' + encodeURIComponent(id));
 export const getSets = () => api('/api/sets');
 export const getGames = () => api('/api/games');
 export const getGame = (id) => api('/api/games/' + id);
+export const getLeaderboard = () => api('/api/leaderboard');
 
 export async function createGame(config) {
   const res = await api('/api/games', { method: 'POST', body: config, token: apiKey() || undefined });

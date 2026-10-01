@@ -14,11 +14,11 @@ import java.util.Set;
 /**
  * Who may do what on this server.
  * <ul>
- *   <li><b>open</b> (trusted local / exhibition mode, the default when bound to a loopback address): anyone who
- *   can reach the server may control bridge seats, watch with both hands revealed and stop games.</li>
- *   <li><b>tokens</b> (the default for any other bind address): controlling a seat needs that seat's token;
- *   revealing hands and stopping a game need the game's owner token (returned to whoever created the game)
- *   or the server API key.</li>
+ *   <li><b>tokens</b> (the default): controlling a seat needs that seat's token; revealing hands and stopping a
+ *   game need the game's owner token (returned to whoever created the game) or the server API key. Hidden
+ *   information is only as safe as the default, so this holds on localhost too.</li>
+ *   <li><b>open</b> (explicit {@code --auth open}, for debugging and trusted exhibitions): anyone who can reach
+ *   the server may control bridge seats, watch with both hands revealed and stop games.</li>
  * </ul>
  * A game created with {@code "require_tokens": true} gets the token rules even on an open server (useful for
  * benchmarks, so that an agent can neither take over nor peek at the other seat).
@@ -82,13 +82,13 @@ public final class AccessPolicy {
 
     /**
      * Policy for a server bound to {@code bindHost} with the given options; {@code mode}/{@code allowDeckPaths}
-     * may be null for the defaults (open + deck paths on loopback, tokens otherwise).
+     * may be null for the defaults (tokens; deck file paths only on a loopback address).
      */
     public static AccessPolicy forBind(String bindHost, Mode mode, String apiKey, Boolean allowDeckPaths,
                                        Collection<String> allowedOrigins, Collection<String> extraHosts) {
         boolean loopback = isLoopback(bindHost);
-        Mode m = mode != null ? mode : (loopback ? Mode.OPEN : Mode.TOKENS);
-        boolean paths = allowDeckPaths != null ? allowDeckPaths : m == Mode.OPEN;
+        Mode m = mode != null ? mode : Mode.TOKENS;
+        boolean paths = allowDeckPaths != null ? allowDeckPaths : loopback;
         // DNS rebinding only matters for an open server that relies on not being reachable from outside
         Collection<String> hosts = m == Mode.OPEN && loopback ? extraHosts : null;
         return new AccessPolicy(m, apiKey, paths, allowedOrigins, hosts);

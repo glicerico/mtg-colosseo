@@ -47,7 +47,7 @@ class ColosseoClient:
 
     # --- plumbing -----------------------------------------------------------------------------
 
-    def _request(self, method: str, path: str, body: Any = None, token: Optional[str] = None) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, token: Optional[str] = None, raw: bool = False) -> Any:
         data = None
         headers = {"Accept": "application/json"}
         if body is not None:
@@ -58,7 +58,8 @@ class ColosseoClient:
         req = urllib.request.Request(self.server + path, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode() or "null")
+                text = resp.read().decode()
+                return text if raw else json.loads(text or "null")
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")
             try:
@@ -114,6 +115,20 @@ class ColosseoClient:
         (needed to watch with hands revealed or to stop the game on a protected server).
         """
         return self._request("POST", "/api/games", {"seats": seats, **options}, token=self.api_key)
+
+    def record(self, game_id: str, seat: Optional[int] = None, token: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The game's JSONL record as a list of lines (``type``: config, decision, action, fallback, result).
+
+        With ``seat``, only what that seat could see (needs its seat token or the owner token): suitable for
+        handing to an agent. Without it, the full record with both players' views (owner token).
+        """
+        path = f"/api/games/{game_id}/record" + (f"?seat={seat}" if seat is not None else "")
+        text = self._request("GET", path, token=token or self.api_key, raw=True)
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def leaderboard(self) -> Dict[str, Any]:
+        """Elo ratings over the server's rated games, by agent identity (``name@version``)."""
+        return self._request("GET", "/api/leaderboard")
 
     def terminate(self, game_id: str, token: Optional[str] = None) -> Dict[str, Any]:
         """Stops a running game. ``token``: the game's owner token (or the API key) on protected servers."""

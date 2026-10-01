@@ -179,8 +179,9 @@ class Decision:
         self.state = State(message.get("state") or {})
         self.log: List[Obj] = [Obj(e) for e in message.get("log", [])]
         self.error: Optional[str] = message.get("error")
-        #: set by the client when the engine rejected a previous answer to this decision
-        self.rejection: Optional[str] = None
+        #: why the previous answer was rejected: set by the client when the engine refused an answer to this
+        #: decision, or by the engine when it asks again after refusing a whole declaration (e.g. blocks)
+        self.rejection: Optional[str] = message.get("rejection")
 
     # --- lookup -------------------------------------------------------------------------------
 

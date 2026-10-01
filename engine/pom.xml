@@ -14,6 +14,10 @@
     <properties>
         <!-- XMage artifacts are not published to Maven Central: install them with scripts/build_xmage.sh -->
         <xmage.version>1.4.61</xmage.version>
+        <!-- keep in sync with XMAGE_REF in scripts/build_xmage.sh; both end up in every game record -->
+        <xmage.ref>12aa9cfcc596680314125c9d968c1b7e5fadecf7</xmage.ref>
+        <!-- set by scripts/build.sh: mvn package -Dsource.commit=$(git rev-parse HEAD) -->
+        <source.commit>unknown</source.commit>
         <javalin.version>6.7.0</javalin.version>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -70,6 +74,12 @@
 
     <build>
         <finalName>colosseo-engine</finalName>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

@@ -151,6 +151,41 @@ public final class DeckLibrary {
     }
 
     /**
+     * The exact deck a seat played (sealed decks are random): its card list and a content hash, so that a
+     * record pins what was played and results can be grouped by deck version.
+     */
+    public static JsonObject fingerprint(Deck deck) {
+        java.util.TreeMap<String, Integer> counts = new java.util.TreeMap<>();
+        for (mage.cards.Card card : deck.getCards()) {
+            counts.merge(card.getName() + " [" + card.getExpansionSetCode() + ":" + card.getCardNumber() + "]", 1, Integer::sum);
+        }
+        com.google.gson.JsonArray list = new com.google.gson.JsonArray();
+        StringBuilder canonical = new StringBuilder();
+        counts.forEach((card, n) -> {
+            list.add(n + " " + card);
+            canonical.append(n).append(' ').append(card).append('\n');
+        });
+        JsonObject o = new JsonObject();
+        o.addProperty("hash", sha256(canonical.toString()));
+        o.addProperty("size", deck.getCards().size());
+        o.add("cards", list);
+        return o;
+    }
+
+    static String sha256(String text) {
+        try {
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : h) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
      * Deck contents for the lobby (card list with counts).
      */
     public JsonObject describe(DeckInfo info) {

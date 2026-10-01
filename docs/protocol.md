@@ -17,6 +17,8 @@ same messages. All payloads are JSON.
 | `POST /api/games` | create and start a game (below); needs the API key if the server has one |
 | `GET /api/games/{id}` | summary: status, turn, seats (with `connected`, `waiting_for_decision`), `protected`, result |
 | `POST /api/games/{id}/terminate` | stop a running game; needs the owner token on protected games |
+| `GET /api/games/{id}/record[?seat=N]` | the game record (JSONL). With `seat`: only what that seat could see (its seat token or the owner token); without: both players' views (owner token) |
+| `GET /api/leaderboard` | Elo over rated games by `agent_id`: `{"rated_games", "ratings": [{"agent_id", "rating", "games", "wins", "losses", "draws", "unfinished", "fallbacks", "forfeits"}]}` |
 
 Credentials (seat token, owner token, API key) are sent as `Authorization: Bearer <secret>`, an
 `X-Colosseo-Token` header or a `token` query parameter. Browsers must send `POST`s from the server's own
@@ -49,7 +51,7 @@ Seat `type`: `agent` or `human` (controlled over the WebSocket - they differ onl
 (XMage's MAD AI, runs in the server, `skill` 1-10: search depth / think time).
 
 `deck`: a deck id from `/api/decks`, a path to an XMage `.dck`/`.txt` deck file on the server (only when
-the server allows deck paths: by default in open mode), or `sealed:SET` (six boosters of SET, auto-built into
+the server allows deck paths: by default on a loopback server), or `sealed:SET` (six boosters of SET, auto-built into
 a 40-card two-color deck).
 
 Options for `agent`/`human` seats:
@@ -60,7 +62,10 @@ Options for `agent`/`human` seats:
 | `stop_policy` | `"all"` / `"arena"` | `all`: ask at every priority with legal actions. `arena`: only in your main phases, during combat and when the opponent puts something on the stack |
 | `yield_after_cast` | `false` / `true` | pass automatically right after casting/activating (let it resolve) |
 | `auto_pay` | `true` / `true` | pay mana costs automatically; otherwise `pay_mana` decisions are raised |
-| `timeout_s` | `0` | apply the decision's default after this many seconds (0 = wait forever) |
+| `timeout_s` | `0` | apply the decision's default after this many seconds (0 = wait forever); counted as a `"timeout"` fallback |
+| `time_bank_s` | `0` | chess clock: total thinking time for the game; running out forfeits it (0 = no clock) |
+| `agent_id` | name | identity in records and ratings, e.g. `"my-agent@1.2"` (the SDK sends `name@version`) |
+| `agent_hash` | - | content hash of the agent's code, stored in the record (the SDK sends one) |
 
 Game options:
 
@@ -69,12 +74,16 @@ Game options:
 | `starting_seat` | `-1` | seat that takes the first turn (-1: random, drawn from the game's seed) |
 | `max_turns` | `60` | the game is a draw after this turn |
 | `pace_ms` | `0` | sleep after every engine update while someone watches (watchable AI games) |
-| `seed` | random | seeds XMage's RNG; when absent the server picks one. Both are recorded in the config record and the result (best effort, see below) |
+| `seed` | random | the game's random generator (shuffles, starting player); when absent the server picks one. Recorded in the config record and the result. Same seed + same deterministic agents = same game |
 | `record` | `true` | write `data/games/<id>.jsonl` |
 | `require_tokens` | `false` | protect this game with tokens even on an open server (see Access control) |
 | `public_comments` | `false` | send agents' `comment`s to the opponent and every spectator |
 | `abandon_timeout_s` | server's `--abandon-timeout` (600) | stop the game (`status: "abandoned"`) when an agent/human seat has had no connection for this long; 0 = never |
 | `deadline_s` | `0` | stop the game (`status: "timeout"`) after this many seconds; 0 = no deadline |
+| `max_decisions` | `10000` | stop the game (`status: "limit"`, void) after this many decisions; 0 = no limit |
+| `max_record_mb` | `100` | stop the game (`status: "limit"`, void) when its record grows past this size; 0 = no limit |
+| `turn_limit_result` | `"draw"` | what reaching `max_turns` means: `"draw"` or `"void"` (`status: "turn_limit"`, not scored) |
+| `rated` | `false` | count the game on the server's leaderboard (requires token protection) |
 
 Response (`201`) - the only place the game's secrets are returned:
 
@@ -96,8 +105,8 @@ creator watch with both hands visible and stop the game. Keep both private.
 
 | server mode | who may control a seat | who may reveal hands / stop the game |
 |---|---|---|
-| `open` (default when bound to `127.0.0.1`/`localhost`) | anyone who can connect | anyone who can connect |
-| `tokens` (default for any other address, or `--auth tokens`) | holders of that seat's `token` | holders of the `owner_token` or the API key |
+| `tokens` (default) | holders of that seat's `token` | holders of the `owner_token` or the API key |
+| `open` (`--auth open`, for debugging) | anyone who can connect | anyone who can connect |
 
 A game created with `"require_tokens": true` follows the `tokens` rules on an open server (useful for
 benchmarks: an agent can neither take over nor peek at the other seat). Independently, a server started with
@@ -149,17 +158,20 @@ agent plus a human watching its view); any of them can answer.
 | `game_over` | `result` (below) |
 
 `result`: `status` (`"finished"` when the rules engine ended the game; `"terminated"`, `"abandoned"`,
-`"timeout"` or `"error"` otherwise), `winner_seat`, `winner`, `draw` (true only for a finished game without a
-winner, e.g. the turn limit - `reason: "turn_limit"`), `reason`/`error` for unfinished games, `turns`,
-`decisions`, `duration_s`, `seed`, `starting_seat`, `players`. Score only `finished` games: an unfinished game
-has no winner and is not a draw.
+`"timeout"`, `"limit"`, `"turn_limit"` (with `turn_limit_result: "void"`) or `"error"` otherwise),
+`winner_seat`, `winner`, `draw` (true only for a finished game without a winner, e.g. the turn limit -
+`reason: "turn_limit"`), `reason`/`error` for unfinished games, `reason: "forfeit"` with `forfeit_seat` and
+`forfeit_reason` (`"concede"`, `"time"`, `"agent_error"`) when a seat forfeited, `turns`, `decisions`,
+`duration_s`, `seed`, `starting_seat`, and `players` (each with `agent_id`, `fallbacks` by reason,
+`clock_used_s` with a time bank, `life`, `won`, `lost`). Score only `finished` games: an unfinished game has no
+winner and is not a draw.
 
 ### Client → server
 
 | type | payload |
 |---|---|
-| `action` | `decision_id` + the answer fields (below) + optional `comment` |
-| `concede` | - |
+| `action` | `decision_id` + the answer fields (below) + optional `comment`, optional `fallback` (`"agent_error"`, `"rejected"`: this is a substitute for the agent's own answer; counted in the result) |
+| `concede` | optional `reason: "agent_error"` (strict mode: the agent crashed) |
 | `settings` | seats: `stop_policy`, `yield_after_cast`; spectators: `reveal` (allowed only for spectators who may reveal; a `token` field can carry the owner token) |
 | `ping` | answered with `pong` |
 
@@ -201,7 +213,7 @@ decision.
 | `choose_pile` | `pile1`, `pile2` (cards) | `{"choice": "pile1" \| "pile2"}` |
 | `pay_mana` | options: mana sources (`kind: source`), `pool:W`… (`kind: pool`), `special`, `cancel` | `{"choice": id}` (only when `auto_pay` is off or automatic payment failed) |
 | `declare_attackers` | `attackers` (each with `defenders` it may attack, `must_attack`), `defenders`, `error` | `{"attackers": [{"attacker": id, "defender": id?}]}` (empty list = no attack; `defender` defaults to the opposing player) |
-| `declare_blockers` | `blockers` (each with the `attackers` it can block), `attackers`, `error` | `{"blocks": [{"blocker": id, "attacker": id}]}` (empty = no blocks) |
+| `declare_blockers` | `blockers` (each with the `attackers` it can block), `attackers` (each with `min_blockers`, e.g. 2 for menace, and `max_blockers`, 0 = no limit), `error`, `rejection` (set when the engine refused the previous declaration as a whole and asks again; the same illegal declaration three times makes the engine declare no blocks, a `"illegal_repeat"` fallback) | `{"blocks": [{"blocker": id, "attacker": id}]}` (empty = no blocks) |
 
 Answers are validated against the options; an invalid answer produces an `error` and the decision stays
 pending. Combat declarations that break rules the options can't express (e.g. "can't block alone",
@@ -229,7 +241,8 @@ menace) are re-asked with `error` set.
 ```
 
 Cards: `id`, `name`, `set`, `number`, `mana_cost` ("{2}{W}"), `mana_value`, `types`, `subtypes`,
-`supertypes`, `colors` ("WU"), `rules` (plain text, current - including gained abilities), `power`/`toughness`
+`supertypes`, `colors` ("WU"), `rules` (plain text, current - including gained abilities), `keywords` (the
+engine's keyword abilities, current: `"flying"`, `"menace"`, `"kicker {3}{B}"`, `"protection from red"`), `power`/`toughness`
 (creatures, current values), `loyalty`, `counters`, `owner`, `token`. Permanents add `controller`, `tapped`,
 `summoning_sick`, `damage`, `attacking`, `blocking`, `attached_to`, `attachments`, `face_down`, `transformed`.
 Face-down objects you don't control appear as `{"id", "name": "Face-down creature", "hidden": true, …}`.

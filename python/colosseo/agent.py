@@ -1,6 +1,8 @@
 """Agent interface and the loop that connects an agent to a seat."""
 from __future__ import annotations
 
+import hashlib
+import inspect
 import logging
 import time
 import traceback
@@ -54,6 +56,25 @@ class Agent:
 
     #: shown in the lobby and game records
     name: str = "agent"
+    #: version (or content hash) of this agent; ratings and records key on ``name@version`` so that results of
+    #: different versions don't mix
+    version: str = ""
+
+    @property
+    def agent_id(self) -> str:
+        return f"{self.name}@{self.version}" if self.version else self.name
+
+    @property
+    def agent_hash(self) -> Optional[str]:
+        """Content hash of the module defining this agent's class (recorded with each game; best effort)."""
+        try:
+            path = inspect.getsourcefile(type(self))
+            if path:
+                with open(path, "rb") as f:
+                    return hashlib.sha256(f.read()).hexdigest()[:16]
+        except (OSError, TypeError):
+            pass
+        return None
 
     def on_game_start(self, info: Dict[str, Any]) -> None:
         """Called once with the server's ``hello`` message (game id, seats, initial state)."""
@@ -76,12 +97,16 @@ class Agent:
 
 def play(agent: Agent, game_id: str, seat: int, server: str = DEFAULT_SERVER,
          token: Optional[str] = None, max_retries: int = 3, reconnect_timeout: float = 60.0,
-         client: Optional[ColosseoClient] = None) -> GameResult:
+         client: Optional[ColosseoClient] = None, on_error: str = "default") -> GameResult:
     """Plays one seat of an existing game until it ends. Blocks; returns the game result.
 
     If the engine rejects an answer (illegal choice), the agent is asked again with
     ``decision.rejection`` set; after ``max_retries`` rejections the decision's default is used.
-    Exceptions raised by the agent are logged and answered with the default action.
+    Exceptions raised by the agent are logged and, with ``on_error="default"``, answered with the default
+    action; with ``on_error="forfeit"`` (strict mode, used by :func:`~colosseo.run_match`) the seat concedes
+    and the result records ``reason: "forfeit", forfeit_reason: "agent_error"``. Every default sent instead
+    of the agent's own answer is marked as a fallback (``"agent_error"`` or ``"rejected"``) and counted per
+    seat in the result (``players[i]["fallbacks"]``).
 
     If the connection drops, ``play`` reconnects for up to ``reconnect_timeout`` seconds and re-sends an
     answer that may have been lost. A game that ended meanwhile is returned (once) with its real result.
@@ -89,9 +114,11 @@ def play(agent: Agent, game_id: str, seat: int, server: str = DEFAULT_SERVER,
     server refused the connection): it has no winner, is not a draw and must not be scored (see
     :func:`outcome`). The server-side game keeps running until it is stopped or abandoned.
     """
+    if on_error not in ("default", "forfeit"):
+        raise ValueError("on_error must be 'default' or 'forfeit'")
     client = client or ColosseoClient(server)
     answered: Dict[int, Dict[str, Any]] = {}  # decision id -> message sent
-    state = {"pending": None, "retries": 0, "started": False}
+    state = {"pending": None, "retries": 0, "started": False, "on_error": on_error}
     give_up_at: Optional[float] = None
     delay = 0.5
     problem = "connection lost"
@@ -209,7 +236,7 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
                 continue
             state["pending"] = Decision(msg)
             state["retries"] = 0
-            _answer(agent, conn, state["pending"], answered, this_connection)
+            _answer(agent, conn, state["pending"], answered, this_connection, state)
         elif kind == "error":
             pending: Optional[Decision] = state["pending"]
             did = msg.get("decision_id")
@@ -220,11 +247,11 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
                 pending.rejection = msg.get("message")
                 log.warning("seat %s: action rejected (%s)", seat, pending.rejection)
                 if state["retries"] >= max_retries:
-                    message = pending.default().to_message(pending.id)
+                    message = dict(pending.default().to_message(pending.id), fallback="rejected")
                     answered[pending.id] = message
                     _send(conn, message)
                 else:
-                    _answer(agent, conn, pending, answered, this_connection)
+                    _answer(agent, conn, pending, answered, this_connection, state)
             else:
                 log.debug("seat %s: server error: %s", seat, msg.get("message"))
         elif kind == "hello":
@@ -244,15 +271,24 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
     return None
 
 
-def _answer(agent: Agent, conn, decision: Decision, answered: Dict[int, Dict[str, Any]], this_connection: set) -> None:
+def _answer(agent: Agent, conn, decision: Decision, answered: Dict[int, Dict[str, Any]], this_connection: set,
+            state: Dict[str, Any]) -> None:
+    fallback = None
     try:
         action = agent.decide(decision)
         if action is None:
-            action = decision.default()
+            action = decision.default()  # the agent's own choice: "use the default"
     except Exception:  # never let a buggy agent freeze the game
         log.error("agent %s failed on %r:\n%s", getattr(agent, "name", agent), decision, traceback.format_exc())
-        action = decision.default()
+        if state.get("on_error") == "forfeit":
+            # strict mode: the game is lost rather than continued with a substitute move
+            this_connection.add(decision.id)
+            _send(conn, {"type": "concede", "reason": "agent_error"})
+            return
+        action, fallback = decision.default(), "agent_error"
     message = action.to_message(decision.id)
+    if fallback:
+        message["fallback"] = fallback
     answered[decision.id] = message
     this_connection.add(decision.id)
     _send(conn, message)

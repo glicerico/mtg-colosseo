@@ -102,7 +102,7 @@ table.games td.actions .btn { margin-left: 4px; }
 .status-running { background: #1f4d33; color: #9be2b6; }
 .status-finished { background: #2b3440; }
 .status-error { background: #5a2323; }
-.status-terminated, .status-abandoned, .status-timeout { background: #4a3a1c; }
+.status-terminated, .status-abandoned, .status-timeout, .status-limit, .status-turn_limit { background: #4a3a1c; }
 
 .deck-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
 .deck-card h3 { margin: 0 0 4px; font-size: 16px; }

@@ -162,6 +162,11 @@ final class QueryTranslator {
             }
         }
         selectable.addAll(chosen);
+        // canonical order (XMage's own order follows random object ids)
+        List<UUID> ordered = new ArrayList<>(selectable);
+        ordered.sort(java.util.Comparator.comparing(id -> StateView.sortKey(game, id)));
+        selectable.clear();
+        selectable.addAll(ordered);
 
         for (UUID id : selectable) {
             JsonObject o = StateView.describe(game, id, player.getId());
@@ -501,7 +506,9 @@ final class QueryTranslator {
     private static Decision mana(GameSession session, BridgePlayer player, Game game, PlayerQueryEvent e) {
         Decision d = session.newDecision(Decision.MANA, player.getId());
         d.prompt = prompt(e);
-        for (MageObject source : player.manaSources(game)) {
+        List<MageObject> sources = new ArrayList<>(player.manaSources(game));
+        sources.sort(java.util.Comparator.comparing(o -> StateView.sortKey(game, o.getId())));
+        for (MageObject source : sources) {
             JsonObject o = d.addOption(source.getId().toString(), "Tap " + source.getName());
             o.addProperty("kind", "source");
         }

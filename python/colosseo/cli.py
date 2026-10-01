@@ -8,7 +8,7 @@ import logging
 import sys
 from typing import Any, List
 
-from .agent import Agent, outcome
+from .agent import Agent, outcome, play
 from .client import ColosseoClient, DEFAULT_SERVER
 from .runner import AgentSpec, round_robin, run_game, run_match
 
@@ -88,12 +88,14 @@ def cmd_match(args: argparse.Namespace) -> None:
     decks: Any = args.decks or None
     match = run_match(resolve_agent(args.a), resolve_agent(args.b), games=args.games, decks=decks,
                       server=args.server, max_turns=args.max_turns, parallel=args.parallel, seed=args.seed,
-                      swap_decks=args.swap_decks, client=_client(args))
+                      swap_decks=args.swap_decks, client=_client(args), rated=args.rated)
     print(match)
     print(f"match seed: {match.seed} (pass --seed {match.seed} to replay this schedule)")
     if args.json:
         _print({"a": match.a, "b": match.b, "wins_a": match.wins_a, "wins_b": match.wins_b,
                 "draws": match.draws, "errors": match.errors, "seed": match.seed,
+                "fallbacks_a": match.fallbacks_a, "fallbacks_b": match.fallbacks_b,
+                "forfeits_a": match.forfeits_a, "forfeits_b": match.forfeits_b,
                 "schedule": [vars(g) for g in match.schedule], "games": match.games})
 
 
@@ -101,7 +103,7 @@ def cmd_tournament(args: argparse.Namespace) -> None:
     players = {spec: resolve_agent(spec) for spec in args.players}
     matches, ratings = round_robin(players, games=args.games, decks=args.decks or None, server=args.server,
                                    max_turns=args.max_turns, parallel=args.parallel, seed=args.seed,
-                                   client=_client(args))
+                                   client=_client(args), rated=args.rated)
     for m in matches:
         print(m)
     if matches:
@@ -109,6 +111,35 @@ def cmd_tournament(args: argparse.Namespace) -> None:
     print("\nElo:")
     for name, rating in ratings.items():
         print(f"  {name:30s} {rating:7.1f}")
+
+
+def cmd_leaderboard(args: argparse.Namespace) -> None:
+    board = _client(args).leaderboard()
+    rows = board.get("ratings", [])
+    print(f"{board.get('rated_games', 0)} rated games")
+    if rows:
+        print(f"{'agent':40s} {'Elo':>7s} {'games':>6s} {'W-L-D':>11s} {'unfin.':>6s} {'fallb.':>6s} {'forf.':>5s}")
+    for r in rows:
+        wld = f"{r['wins']}-{r['losses']}-{r['draws']}"
+        print(f"{r['agent_id'][:40]:40s} {r['rating']:7.1f} {r['games']:6d} {wld:>11s} {r['unfinished']:6d}"
+              f" {r['fallbacks']:6d} {r['forfeits']:5d}")
+
+
+def cmd_record(args: argparse.Namespace) -> None:
+    """Writes a game record (JSONL) to stdout: one seat's view with --seat, else the full record."""
+    for line in _client(args).record(args.game_id, seat=args.seat, token=args.token):
+        print(json.dumps(line))
+
+
+def cmd_agent(args: argparse.Namespace) -> None:
+    """Plays one seat of an existing game from this process (run it in its own container/sandbox)."""
+    spec = resolve_agent(args.agent)
+    if isinstance(spec, str):
+        raise SystemExit("--agent must be a Python agent (built-in name or module:Class)")
+    agent = spec() if not isinstance(spec, Agent) else spec
+    result = play(agent, args.game_id, args.seat, args.server, token=args.token, client=_client(args),
+                  on_error=args.on_error)
+    _print(result)
 
 
 def cmd_watch(args: argparse.Namespace) -> None:
@@ -161,6 +192,9 @@ def main(argv: List[str] = None) -> None:
         p.add_argument("--parallel", type=int, default=1, help="games played concurrently")
         p.add_argument("--seed", type=int, help="seed (games: engine seed; matches: schedule seed)")
 
+    def rated_opt(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--rated", action="store_true", help="count the games on the server's leaderboard")
+
     p = sub.add_parser("play", help="play one agent against an opponent")
     p.add_argument("--agent", default="heuristic", help="random|heuristic|claude|human|xmage[:N]|module:Class")
     p.add_argument("--opponent", default="xmage", help="same forms as --agent")
@@ -180,6 +214,7 @@ def main(argv: List[str] = None) -> None:
     p.add_argument("--swap-decks", action="store_true", help="players also swap decks within each block of games")
     p.add_argument("--json", action="store_true", help="print the schedule and per-game results as JSON")
     game_opts(p)
+    rated_opt(p)
     p.set_defaults(fn=cmd_match)
 
     p = sub.add_parser("tournament", help="round robin with Elo ratings")
@@ -187,7 +222,25 @@ def main(argv: List[str] = None) -> None:
     p.add_argument("--games", type=int, default=10, help="games per pairing")
     p.add_argument("--decks", nargs="*")
     game_opts(p)
+    rated_opt(p)
     p.set_defaults(fn=cmd_tournament)
+
+    sub.add_parser("leaderboard", help="Elo ratings over the server's rated games").set_defaults(fn=cmd_leaderboard)
+
+    p = sub.add_parser("record", help="download a game record (JSONL)")
+    p.add_argument("game_id")
+    p.add_argument("--seat", type=int, help="only what this seat could see (needs its token)")
+    p.add_argument("--token", help="seat token or owner token")
+    p.set_defaults(fn=cmd_record)
+
+    p = sub.add_parser("agent", help="play one seat of an existing game from this process")
+    p.add_argument("game_id")
+    p.add_argument("--seat", type=int, required=True)
+    p.add_argument("--token", help="the seat's token")
+    p.add_argument("--agent", default="heuristic", help="random|heuristic|claude|module:Class")
+    p.add_argument("--on-error", choices=["default", "forfeit"], default="default",
+                   help="what an exception in the agent does (forfeit = concede the game)")
+    p.set_defaults(fn=cmd_agent)
 
     p = sub.add_parser("watch", help="print a game's log live")
     p.add_argument("game_id")

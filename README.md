@@ -40,15 +40,16 @@ scripts/run_server.sh     # http://localhost:7070  (first start builds the card 
 
 Open http://localhost:7070, pick a deck and play against XMage's AI, or start an AI-vs-AI exhibition and watch.
 
-The server listens on `127.0.0.1` in *open* mode (no tokens needed - for local use). To let other machines
-connect, bind to all interfaces: the server then requires the per-game tokens returned when a game is created
-(the lobby keeps them; invitation links carry them), and `COLOSSEO_API_KEY` restricts who may create games:
+The server listens on `127.0.0.1`, and every game is protected by the per-game tokens returned when it is
+created (the lobby and the Python runners keep them; invitation links carry them): a seat needs its token, and
+showing both hands or stopping a game needs the owner token. `--auth open` turns that off for local debugging.
+To let other machines connect, bind to all interfaces; `COLOSSEO_API_KEY` restricts who may create games:
 
 ```bash
 HOST=0.0.0.0 COLOSSEO_API_KEY=change-me scripts/run_server.sh
 ```
 
-Or with Docker (token mode, since the container listens on all interfaces):
+Or with Docker:
 
 ```bash
 docker build -t mtg-colosseo .
@@ -135,16 +136,28 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
 
 - **Game records**: every game writes `data/games/<id>.jsonl` with the config, each decision (including the
   full observation), each answer and the result - ready for imitation learning. Disable with `"record": false`.
+  Keep the data directory away from agents under evaluation (see docs/architecture.md, "Isolating agents").
 - **Decision granularity**: priority is only asked when the seat has a legal non-mana action (`auto_pass`,
   default on); mana is paid automatically (`auto_pay`). Seats can opt into asking at every priority
   (`"auto_pass": false`) and manual payment (`"auto_pay": false`).
-- **Timeouts**: `timeout_s` on a seat applies the decision's default action when an agent is too slow;
-  `deadline_s` bounds a whole game and `abandon_timeout_s` stops games whose agent disconnected.
-- **Scoring**: only games the engine finished count (`colosseo.outcome`); interrupted, stopped or crashed
-  games are reported as errors, never as draws, and don't change Elo.
-- **Determinism**: matches follow a schedule computed from their seed (deck pairings, seats, alternating
-  starting player, one engine seed per game), identical with any parallelism and stored with the results.
-  Gameplay is best-effort reproducible: XMage's RNG is shared by concurrent games and its AI is time-bounded.
+- **Clocks and limits**: `timeout_s` on a seat applies the decision's default when an agent is too slow;
+  `time_bank_s` is a chess clock (running out forfeits the game). `max_decisions`, `max_record_mb` and
+  `deadline_s` void runaway games, `abandon_timeout_s` stops games whose agent disconnected, and
+  `turn_limit_result` decides whether hitting `max_turns` is a draw or void.
+- **Scoring**: only games the engine finished count (`colosseo.outcome`); interrupted, stopped, void or
+  crashed games are reported as errors, never as draws, and don't change Elo. Default moves substituted for an
+  agent's own (exceptions, rejected answers, timeouts) are marked as fallbacks and counted per seat; matches are
+  strict by default, so an agent exception forfeits the game.
+- **Ratings**: agents are identified as `name@version` (plus a content hash in the records); games created with
+  `rated` feed the server's leaderboard (`/api/leaderboard`, the Leaderboard page, `colosseo leaderboard`).
+- **Determinism**: a game's seed reproduces it: XMage is patched (`scripts/xmage-patches`) so each game has its
+  own random generator, and options are listed in a canonical order. Same seed + same deterministic agents =
+  same game, even with other games running. Matches follow a schedule computed from their seed (deck pairings,
+  seats, alternating starting player, one engine seed per game). XMage's own AI is not deterministic
+  (time-bounded search).
+- **Records**: `data/games/<id>.jsonl` pins the engine, XMage, deck and agent versions. A record holds both
+  players' observations; `GET /api/games/{id}/record?seat=N` (or `colosseo record ID --seat N`) gives the view
+  of one seat, suitable for handing to that agent.
 - **Resources**: MAD AI games are CPU and memory hungry - give the JVM ~1 GB per concurrently running AI
   game (`JAVA_OPTS=-Xmx8g scripts/run_server.sh`).
 

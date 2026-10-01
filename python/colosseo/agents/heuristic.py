@@ -31,6 +31,15 @@ def text_of(card: Optional[Dict]) -> str:
     return " ".join(card.get("rules") or [])
 
 
+def has_keyword(card: Optional[Dict], keyword: str) -> bool:
+    """Engine-reported keywords; falls back to the rules text for older servers."""
+    if not card:
+        return False
+    if card.get("keywords") is not None:
+        return any(k == keyword or k.startswith(keyword + " ") for k in card["keywords"])
+    return keyword in text_of(card).lower()
+
+
 def is_creature(card: Optional[Dict]) -> bool:
     return bool(card) and "Creature" in (card.get("types") or [])
 
@@ -53,6 +62,7 @@ class HeuristicAgent(Agent):
     """Simple, fast, deterministic baseline."""
 
     name = "heuristic"
+    version = "1"
 
     def decide(self, d: Decision) -> Action:
         handler = getattr(self, "_" + d.kind, None)
@@ -283,6 +293,8 @@ class HeuristicAgent(Agent):
         s = d.state
         me = s.me
         attackers = {a["id"]: (s.find(a["id"]) or a) for a in d.raw.get("attackers", [])}
+        # one blocker per attacker: attackers that need more (menace) are left unblocked
+        single_ok = {a["id"] for a in d.raw.get("attackers", []) if (a.get("min_blockers") or 1) <= 1}
         incoming = sum((a.get("power") or 0) for a in attackers.values())
         life = (me.life or 20) if me else 20
         in_danger = incoming >= life
@@ -292,15 +304,17 @@ class HeuristicAgent(Agent):
         options = {b["id"]: b.get("attackers", []) for b in d.raw.get("blockers", [])}
         for att_id, att in sorted(attackers.items(), key=lambda kv: -((kv[1].get("power") or 0))):
             ap, at = att.get("power") or 0, att.get("toughness") or 0
+            if att_id not in single_ok:
+                continue
             candidates = [bid for bid, legal in options.items() if att_id in legal and bid not in used]
             best = None
             best_score = 0.0
             for bid in candidates:
                 b = blockers[bid]
                 bp, bt = b.get("power") or 0, b.get("toughness") or 0
-                deathtouch = "deathtouch" in text_of(b).lower()
+                deathtouch = has_keyword(b, "deathtouch")
                 kills = bp >= at or deathtouch
-                survives = bt > ap and "deathtouch" not in text_of(att).lower()
+                survives = bt > ap and not has_keyword(att, "deathtouch")
                 score = 0.0
                 if kills and survives:
                     score = 3 + value(att)

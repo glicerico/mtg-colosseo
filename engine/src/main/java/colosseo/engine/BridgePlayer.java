@@ -269,7 +269,11 @@ public class BridgePlayer extends HumanPlayer {
             passOpt.addProperty("action", "pass");
             JsonObject passTurn = d.addOption("pass_turn", "Pass until end of turn");
             passTurn.addProperty("action", "pass_turn");
-            for (Map.Entry<String, ActivatedAbility> e : actions.entrySet()) {
+            // canonical order (XMage's own order follows random object ids)
+            List<Map.Entry<String, ActivatedAbility>> ordered = new ArrayList<>(actions.entrySet());
+            ordered.sort(java.util.Comparator.comparing(e -> StateView.sortKey(game, e.getValue().getSourceId())
+                    + "|" + e.getValue().getClass().getSimpleName() + "|" + ruleText(e.getValue(), "")));
+            for (Map.Entry<String, ActivatedAbility> e : ordered) {
                 describeAction(game, d, e.getKey(), e.getValue());
             }
             d.defaultAction = Decision.choiceAction("pass");
@@ -425,6 +429,7 @@ public class BridgePlayer extends HumanPlayer {
             if (possible.isEmpty()) {
                 return;
             }
+            possible.sort(java.util.Comparator.comparing(p -> StateView.sortKey(game, p.getId())));
             Set<UUID> defenders = game.getCombat().getDefenders();
 
             Decision d = seat.session().newDecision(Decision.ATTACKERS, getId());
@@ -609,6 +614,17 @@ public class BridgePlayer extends HumanPlayer {
         return null;
     }
 
+    // XMage validates a whole block declaration (menace, "must block", ...) and asks again when it is illegal,
+    // with a new decision: these remember the previous answer in the same combat to report the rejection and
+    // to stop an agent that keeps sending the same illegal assignment
+    private transient String blockCombatKey;
+    private transient String lastBlockAnswer;
+    private transient int blockAsks;
+    private transient int identicalBlockAnswers;
+
+    static final int MAX_IDENTICAL_ILLEGAL_BLOCKS = 3;
+    static final int MAX_BLOCK_ASKS_PER_COMBAT = 10;
+
     @Override
     public void selectBlockers(Ability source, Game game, UUID defendingPlayerId) {
         if (!canFeedback(game)) {
@@ -616,8 +632,25 @@ public class BridgePlayer extends HumanPlayer {
         }
         FilterCreatureForCombatBlock filter = filterCreatureForCombatBlock.copy();
         filter.add(new ControllerIdPredicate(defendingPlayerId));
-        List<Permanent> possible = game.getBattlefield().getActivePermanents(filter, getId(), source, game);
+        List<Permanent> possible = new ArrayList<>(game.getBattlefield().getActivePermanents(filter, getId(), source, game));
         if (possible.isEmpty() || game.getCombat().getAttackers().isEmpty()) {
+            return;
+        }
+        possible.sort(java.util.Comparator.comparing(p -> StateView.sortKey(game, p.getId())));
+
+        String combatKey = game.getTurnNum() + "|" + game.getTurnStepType() + "|"
+                + new java.util.TreeSet<>(game.getCombat().getAttackers());
+        boolean reask = combatKey.equals(blockCombatKey);
+        if (!reask) {
+            blockCombatKey = combatKey;
+            lastBlockAnswer = null;
+            blockAsks = 0;
+            identicalBlockAnswers = 0;
+        }
+        if (++blockAsks > MAX_BLOCK_ASKS_PER_COMBAT) {
+            // not even "no blocks" satisfied the requirements: the game can't continue sensibly
+            seat.session().stop("error", "seat " + seat.index + ": no legal block declaration after "
+                    + MAX_BLOCK_ASKS_PER_COMBAT + " attempts");
             return;
         }
 
@@ -645,6 +678,12 @@ public class BridgePlayer extends HumanPlayer {
             for (UUID attackerId : group.getAttackers()) {
                 JsonObject a = StateView.describe(game, attackerId, getId());
                 a.addProperty("defender", Json.str(group.getDefenderId()));
+                Permanent attacker = game.getPermanent(attackerId);
+                if (attacker != null) {
+                    // blocking requirements the engine enforces on the whole declaration (menace: 2, ...)
+                    a.addProperty("min_blockers", Math.max(1, attacker.getMinBlockedBy()));
+                    a.addProperty("max_blockers", attacker.getMaxBlockedBy());
+                }
                 attackersJson.add(a);
             }
         }
@@ -655,12 +694,31 @@ public class BridgePlayer extends HumanPlayer {
         if (info != null) {
             d.extra.addProperty("error", info);
         }
+        if (reask) {
+            d.extra.addProperty("rejection", info != null ? info
+                    : "The previous block declaration was illegal as a whole (e.g. a creature with menace needs two or"
+                    + " more blockers, or a creature must block). Declare again.");
+        }
         JsonObject none = new JsonObject();
         none.add("blocks", new JsonArray());
         d.defaultAction = none;
 
         JsonObject answer = ask(game, d);
         if (answer == null || game.executingRollback()) {
+            return;
+        }
+        String normalized = normalizedBlocks(answer);
+        identicalBlockAnswers = reask && normalized.equals(lastBlockAnswer) ? identicalBlockAnswers + 1 : 0;
+        lastBlockAnswer = normalized;
+        if (identicalBlockAnswers >= MAX_IDENTICAL_ILLEGAL_BLOCKS - 1) {
+            // the same illegal assignment again: declare no blocks instead and say so in the record
+            seat.session().noteFallback(seat, d, "illegal_repeat",
+                    "repeated an illegal block declaration " + MAX_IDENTICAL_ILLEGAL_BLOCKS + " times; no blocks declared");
+            for (Permanent blocker : possible) {
+                if (blocker.getBlocking() > 0) {
+                    game.getCombat().removeBlocker(blocker.getId(), game);
+                }
+            }
             return;
         }
         // clear a previous (invalid) declaration of ours
@@ -682,6 +740,15 @@ public class BridgePlayer extends HumanPlayer {
             declareBlocker(defendingPlayerId, UUID.fromString(blocker), UUID.fromString(attacker), game);
         }
         // Combat validates the configuration and calls selectBlockers again if it is illegal
+    }
+
+    private static String normalizedBlocks(JsonObject answer) {
+        List<String> pairs = new ArrayList<>();
+        for (JsonObject pair : pairs(answer, "blocks", "blocker", "attacker")) {
+            pairs.add(Json.getString(pair, "blocker", "") + ">" + Json.getString(pair, "attacker", ""));
+        }
+        Collections.sort(pairs);
+        return String.join(",", pairs);
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -737,6 +804,8 @@ public class BridgePlayer extends HumanPlayer {
     public List<MageObject> manaSources(Game game) {
         List<MageObject> producers = new ArrayList<>(getAvailableManaProducers(game));
         producers.addAll(getAvailableManaProducersWithCost(game));
+        // canonical order: which land auto-pay taps must not depend on random object ids
+        producers.sort(java.util.Comparator.comparing(o -> StateView.sortKey(game, o.getId())));
         return producers;
     }
 
@@ -888,7 +957,7 @@ public class BridgePlayer extends HumanPlayer {
      */
     private List<MageObject> getSortedProducers(ManaCosts<ManaCost> unpaid, Game game) {
         List<MageObject> unsorted = manaSources(game);
-        Map<MageObject, Integer> scored = new HashMap<>();
+        Map<MageObject, Integer> scored = new LinkedHashMap<>(); // keeps the canonical order for equal scores
         for (MageObject mageObject : unsorted) {
             int score = 0;
             for (ManaCost cost : unpaid) {
