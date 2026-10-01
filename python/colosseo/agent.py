@@ -103,18 +103,26 @@ def play(agent: Agent, game_id: str, seat: int, server: str = DEFAULT_SERVER,
         except Exception as e:  # noqa: BLE001 - network errors while (re)connecting
             problem = f"can't connect: {e}"
         if conn is not None:
+            state["progress"] = False
+            send_failure: Optional[str] = None
             try:
                 result = _session(agent, conn, seat, answered, state, max_retries)
+            except _TransportError as e:
+                # the socket died while we were answering: recover like any other lost connection (the
+                # answer stays cached in `answered` and is re-sent if the decision is still pending)
+                result, send_failure = None, str(e)
             finally:
                 conn.close()
             if result is not None:
                 return result
+            if state["progress"]:
+                give_up_at = None  # the game moved on since the last outage: this one gets a fresh window
             if conn.refused:
                 result = _unfinished(game_id, "error", f"server refused seat {seat}: {conn.close_reason or conn.close_code}")
                 log.error("seat %s: %s", seat, result["error"])
                 agent.on_game_end(result)
                 return result
-            detail = " ".join(str(x) for x in (conn.close_code, conn.close_reason) if x)
+            detail = " ".join(str(x) for x in (conn.close_code, conn.close_reason) if x) or send_failure
             problem = "connection lost" + (f" ({detail})" if detail else "")
             delay = 0.5  # the connection worked: start backing off from scratch
 
@@ -145,6 +153,17 @@ def play(agent: Agent, game_id: str, seat: int, server: str = DEFAULT_SERVER,
         delay = min(delay * 2, 5.0)
 
 
+class _TransportError(Exception):
+    """Sending on the seat connection failed (as opposed to an error in the agent's own code)."""
+
+
+def _send(conn, message: Dict[str, Any]) -> None:
+    try:
+        conn.send(message)
+    except Exception as e:  # noqa: BLE001 - whatever the transport raises, the connection is unusable
+        raise _TransportError(f"send failed: {e}") from e
+
+
 def _unfinished(game_id: str, status: str, reason: str) -> GameResult:
     return {"status": status, "error": reason, "reason": reason, "winner_seat": None, "winner": None,
             "draw": False, "game_id": game_id}
@@ -156,6 +175,10 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
     this_connection: set = set()
     for msg in conn.messages():
         kind = msg.get("type")
+        if kind != "hello":
+            # game traffic after the handshake: this connection was usable (a socket that only says hello
+            # and drops doesn't count, so a flapping server still exhausts the recovery window)
+            state["progress"] = True
         if kind == "decision":
             did = msg["decision_id"]
             if did in this_connection:
@@ -164,7 +187,7 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
                 # re-delivered after a reconnect: our answer may have been lost, send it again (a stale
                 # answer is harmlessly rejected by the server)
                 this_connection.add(did)
-                conn.send(answered[did])
+                _send(conn, answered[did])
                 continue
             state["pending"] = Decision(msg)
             state["retries"] = 0
@@ -180,8 +203,8 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
                 log.warning("seat %s: action rejected (%s)", seat, pending.rejection)
                 if state["retries"] >= max_retries:
                     message = pending.default().to_message(pending.id)
-                    conn.send(message)
                     answered[pending.id] = message
+                    _send(conn, message)
                 else:
                     _answer(agent, conn, pending, answered, this_connection)
             else:
@@ -210,4 +233,4 @@ def _answer(agent: Agent, conn, decision: Decision, answered: Dict[int, Dict[str
     message = action.to_message(decision.id)
     answered[decision.id] = message
     this_connection.add(decision.id)
-    conn.send(message)
+    _send(conn, message)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import queue
 import random
 import threading
 import time
@@ -105,38 +106,74 @@ def run_game(player0: AgentSpec, player1: AgentSpec, deck0: str, deck1: Optional
             url = server.rstrip("/") + (s.get("url") or f"/#/game/{game_id}/seat/{s['seat']}")
             log.warning("seat %s is human: open %s", s["seat"], url)
 
-    results: List[GameResult] = []
-    threads = []
+    # Seat workers report through a queue so that the first unrecoverable seat triggers cleanup right away:
+    # the other seat is usually still connected, waiting for a move that will never come.
+    outcomes: "queue.Queue[GameResult]" = queue.Queue()
+    workers = 0
     for index, player in enumerate((p0, p1)):
         if isinstance(player, Agent):
             token = created["seats"][index].get("token")
-            t = threading.Thread(
-                target=lambda a=player, i=index, tk=token: results.append(
-                    play(a, game_id, i, server, tk, reconnect_timeout=reconnect_timeout, client=client)),
-                name=f"colosseo-{game_id}-seat{index}", daemon=True)
-            threads.append(t)
-            t.start()
-    for t in threads:
-        t.join()
-    if not results:
+
+            def work(a: Agent = player, i: int = index, tk: Optional[str] = token) -> None:
+                try:
+                    r = play(a, game_id, i, server, tk, reconnect_timeout=reconnect_timeout, client=client)
+                except Exception as e:  # noqa: BLE001 - e.g. an exception from an agent hook
+                    log.error("game %s: seat %s worker failed: %r", game_id, i, e)
+                    r = {"status": "error", "error": f"seat {i} worker failed: {e!r}", "winner_seat": None,
+                         "draw": False}
+                outcomes.put(r)
+
+            threading.Thread(target=work, name=f"colosseo-{game_id}-seat{index}", daemon=True).start()
+            workers += 1
+
+    results: List[GameResult] = []
+    server_result: Optional[GameResult] = None
+    server_status: Optional[str] = None
+    if workers:
+        results.append(outcomes.get())
+        if not is_terminal(results[0]):
+            server_result, server_status = _reconcile(client, game_id, owner_token)
+        # the remaining seat ends promptly (game over, or the game was just stopped); never wait forever
+        give_up = time.monotonic() + reconnect_timeout + 15
+        while len(results) < workers:
+            try:
+                results.append(outcomes.get(timeout=max(0.0, give_up - time.monotonic())))
+            except queue.Empty:
+                log.warning("game %s: a seat worker did not finish; giving up on it", game_id)
+                break
+    else:
         # no agent seat in this process (e.g. xmage vs xmage): wait for the server
         results.append(_wait_for_result(client, game_id, reconnect_timeout))
 
-    # prefer a terminal result (both seats normally report the same one)
-    result = dict(next((r for r in results if is_terminal(r)), results[0]))
-    if not is_terminal(result):
-        # don't leave an orphaned game running on the server
-        try:
-            info = client.game(game_id)
-            if info.get("result") and is_terminal(info["result"]):
-                result = dict(info["result"])  # it finished after all
-            elif info.get("status") == "running":
-                client.terminate(game_id, owner_token)
-                result.setdefault("server_status", "terminated")
-        except ColosseoError as e:
-            log.warning("game %s: can't clean up the server game: %s", game_id, e)
+    # one result per game: the server's terminal result, else a seat's terminal one (both seats normally
+    # report the same), else the unfinished one
+    terminal = server_result or next((r for r in results if is_terminal(r)), None)
+    result = dict(terminal or results[0])
+    if terminal is None:
+        if server_status is None:
+            server_result, server_status = _reconcile(client, game_id, owner_token)
+            if server_result:
+                result = dict(server_result)
+        if server_status and not server_result:
+            result.setdefault("server_status", server_status)
     result["game_id"] = game_id
     return result
+
+
+def _reconcile(client: ColosseoClient, game_id: str, owner_token: Optional[str]) -> Tuple[Optional[GameResult], Optional[str]]:
+    """After a seat failed: returns the server's terminal result if the game finished after all, otherwise
+    stops the still-running server game. Returns (terminal result or None, server status)."""
+    try:
+        info = client.game(game_id)
+        if info.get("result") and is_terminal(info["result"]):
+            return dict(info["result"]), info.get("status")
+        if info.get("status") in ("running", "created"):
+            client.terminate(game_id, owner_token)
+            return None, "terminated"
+        return None, info.get("status")
+    except ColosseoError as e:
+        log.warning("game %s: can't reconcile with the server: %s", game_id, e)
+        return None, None
 
 
 def _wait_for_result(client: ColosseoClient, game_id: str, unreachable_timeout: float) -> GameResult:
