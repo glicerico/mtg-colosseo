@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python SDK unit tests + web syntax
+    # same-repository pull requests are already covered by the push event
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the SDK
+        run: pip install -e "python/[dev]"
+      - name: Unit tests
+        run: python -m pytest python/tests -m "not integration" -q
+      - name: Check web modules parse
+        run: for f in web/js/*.js; do node --check "$f"; done
+
+  engine:
+    name: Engine build, engine tests and integration tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache the XMage build
+        id: xmage-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/mage
+          key: xmage-${{ hashFiles('scripts/build_xmage.sh') }}
+      - name: Build XMage
+        if: steps.xmage-cache.outputs.cache-hit != 'true'
+        env:
+          MAVEN_OPTS: -Xmx5g
+          XMAGE_DIR: ${{ runner.temp }}/xmage
+        run: scripts/build_xmage.sh
+      - name: Build the engine (runs the engine unit tests)
+        run: cd engine && mvn -B package
+      - name: Start the server
+        run: |
+          mkdir -p data
+          JAVA_OPTS=-Xmx4g nohup scripts/run_server.sh > server.log 2>&1 &
+          for i in $(seq 1 240); do
+            if curl -fs http://localhost:7070/api/health; then echo; exit 0; fi
+            sleep 1
+          done
+          echo "server did not start"; cat server.log; exit 1
+      - name: Integration tests
+        env:
+          COLOSSEO_REQUIRE_SERVER: "1"
+        run: |
+          pip install -e "python/[dev]"
+          python -m pytest python/tests -m integration -v
+      - name: Server log
+        if: always()
+        run: tail -n 200 server.log || true

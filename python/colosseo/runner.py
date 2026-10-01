@@ -10,10 +10,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from .agent import Agent, GameResult, play
-from .client import ColosseoClient, DEFAULT_SERVER
+from .agent import Agent, GameResult, is_terminal, outcome, play
+from .client import ColosseoClient, ColosseoError, DEFAULT_SERVER
 
-__all__ = ["AgentSpec", "run_game", "run_match", "round_robin", "MatchResult", "elo_ratings", "wait_for_server"]
+__all__ = ["AgentSpec", "run_game", "run_match", "round_robin", "MatchResult", "ScheduledGame", "match_schedule",
+           "elo_ratings", "wait_for_server"]
 
 log = logging.getLogger("colosseo")
 
@@ -67,57 +68,161 @@ def _seat(player: Union[Agent, str], deck: str, name: Optional[str]) -> Dict[str
 def run_game(player0: AgentSpec, player1: AgentSpec, deck0: str, deck1: Optional[str] = None, *,
              server: str = DEFAULT_SERVER, names: Sequence[Optional[str]] = (None, None),
              starting_seat: int = -1, max_turns: int = 60, pace_ms: int = 0, seed: Optional[int] = None,
-             record: bool = True, title: Optional[str] = None,
-             on_created: Optional[Callable[[Dict[str, Any]], None]] = None) -> GameResult:
+             record: bool = True, title: Optional[str] = None, deadline_s: Optional[float] = None,
+             reconnect_timeout: float = 60.0, client: Optional[ColosseoClient] = None,
+             on_created: Optional[Callable[[Dict[str, Any]], None]] = None,
+             **options: Any) -> GameResult:
     """Plays one game and returns its result.
 
     ``player0``/``player1`` are agents or built-ins (``"xmage"``, ``"xmage:5"``, ``"human"``).
     Agent seats are driven from threads in this process; XMage seats run inside the server.
+    ``seed`` and ``starting_seat`` are passed to the engine (the engine picks and records a seed when none
+    is given). ``deadline_s`` stops the game server-side after that many seconds. Extra keyword arguments
+    are passed to the server as game options (e.g. ``require_tokens=True``).
+
+    If the game can't be followed to its end (connection lost and not recovered), the server-side game is
+    stopped and the returned result is unfinished (``status`` is not ``"finished"``; see
+    :func:`~colosseo.agent.outcome`).
     """
-    client = ColosseoClient(server)
+    client = client or ColosseoClient(server)
     p0, p1 = _instantiate(player0), _instantiate(player1)
     seats = [_seat(p0, deck0, names[0]), _seat(p1, deck1 or deck0, names[1])]
-    options: Dict[str, Any] = {"starting_seat": starting_seat, "max_turns": max_turns, "pace_ms": pace_ms,
-                               "record": record}
+    game_options: Dict[str, Any] = {"starting_seat": starting_seat, "max_turns": max_turns, "pace_ms": pace_ms,
+                                    "record": record, **options}
     if seed is not None:
-        options["seed"] = seed
+        game_options["seed"] = seed
     if title:
-        options["title"] = title
-    created = client.create_game(seats, **options)
+        game_options["title"] = title
+    if deadline_s:
+        game_options["deadline_s"] = deadline_s
+    created = client.create_game(seats, **game_options)
     game_id = created["game_id"]
+    owner_token = created.get("owner_token")
     if on_created:
         on_created(created)
     for s in created["seats"]:
         if s["type"] == "human":
-            log.warning("seat %s is human: open %s/#/game/%s/seat/%s", s["seat"], server, game_id, s["seat"])
+            url = server.rstrip("/") + (s.get("url") or f"/#/game/{game_id}/seat/{s['seat']}")
+            log.warning("seat %s is human: open %s", s["seat"], url)
 
     results: List[GameResult] = []
     threads = []
     for index, player in enumerate((p0, p1)):
         if isinstance(player, Agent):
             token = created["seats"][index].get("token")
-            t = threading.Thread(target=lambda a=player, i=index, tk=token: results.append(play(a, game_id, i, server, tk)),
-                                 name=f"colosseo-{game_id}-seat{index}", daemon=True)
+            t = threading.Thread(
+                target=lambda a=player, i=index, tk=token: results.append(
+                    play(a, game_id, i, server, tk, reconnect_timeout=reconnect_timeout, client=client)),
+                name=f"colosseo-{game_id}-seat{index}", daemon=True)
             threads.append(t)
             t.start()
     for t in threads:
         t.join()
     if not results:
         # no agent seat in this process (e.g. xmage vs xmage): wait for the server
-        while True:
+        results.append(_wait_for_result(client, game_id, reconnect_timeout))
+
+    # prefer a terminal result (both seats normally report the same one)
+    result = dict(next((r for r in results if is_terminal(r)), results[0]))
+    if not is_terminal(result):
+        # don't leave an orphaned game running on the server
+        try:
             info = client.game(game_id)
-            if info.get("result"):
-                results.append(info["result"])
-                break
-            time.sleep(0.5)
-    result = dict(results[0])
+            if info.get("result") and is_terminal(info["result"]):
+                result = dict(info["result"])  # it finished after all
+            elif info.get("status") == "running":
+                client.terminate(game_id, owner_token)
+                result.setdefault("server_status", "terminated")
+        except ColosseoError as e:
+            log.warning("game %s: can't clean up the server game: %s", game_id, e)
     result["game_id"] = game_id
     return result
 
 
+def _wait_for_result(client: ColosseoClient, game_id: str, unreachable_timeout: float) -> GameResult:
+    failing_since: Optional[float] = None
+    while True:
+        try:
+            info = client.game(game_id)
+            failing_since = None
+            if info.get("result"):
+                return info["result"]
+        except ColosseoError as e:
+            now = time.monotonic()
+            failing_since = failing_since or now
+            if e.status == 404 or now - failing_since > unreachable_timeout:
+                return {"status": "interrupted", "error": f"lost track of the game: {e}", "winner_seat": None,
+                        "draw": False}
+        time.sleep(0.5)
+
+
+@dataclass(frozen=True)
+class ScheduledGame:
+    """One planned game of a match: who sits where with which deck, who starts and the engine seed."""
+    index: int
+    deck_a: str
+    deck_b: str
+    #: seat (0/1) played by player A
+    a_seat: int
+    #: seat that takes the first turn
+    starting_seat: int
+    seed: int
+
+    @property
+    def a_starts(self) -> bool:
+        return self.starting_seat == self.a_seat
+
+
+def match_schedule(games: int, decks: Union[str, Sequence[str], Sequence[Tuple[str, str]]], *,
+                   seed: int, swap_seats: bool = True, swap_decks: bool = False) -> List[ScheduledGame]:
+    """Plans a match deterministically from ``seed`` (independent of parallel execution).
+
+    Games come in blocks that share a deck pairing: within a block the starting player is reversed, so
+    A and B each start once with the same decks (paired comparison); with ``swap_decks`` the block has four
+    games and the players also swap decks. With ``swap_seats`` the players alternate seats from game to
+    game (seat 0 vs 1 matters to nothing in the rules, but it keeps seat-dependent code honest).
+    ``decks``: one deck id (mirror), a list of deck ids (each block draws a random ordered pair) or a list
+    of ``(deck_a, deck_b)`` pairs used in turn. Every game gets its own seed derived from ``seed``.
+    """
+    rng = random.Random(seed)
+    if isinstance(decks, str):
+        pairs: Optional[List[Tuple[str, str]]] = [(decks, decks)]
+        pool: List[str] = []
+    elif decks and isinstance(decks[0], (tuple, list)):
+        pairs = [(str(p[0]), str(p[1])) for p in decks]  # type: ignore[index]
+        pool = []
+    else:
+        pairs, pool = None, [str(d) for d in decks]  # type: ignore[union-attr]
+        if not pool:
+            raise ValueError("no decks to schedule")
+    block_size = 4 if swap_decks else 2
+    schedule: List[ScheduledGame] = []
+    block = -1
+    deck_a = deck_b = ""
+    for i in range(games):
+        if i % block_size == 0:
+            block += 1
+            if pairs is not None:
+                deck_a, deck_b = pairs[block % len(pairs)]
+            else:
+                deck_a, deck_b = rng.choice(pool), rng.choice(pool)
+        k = i % block_size
+        a_starts = k % 2 == 0
+        swapped = k >= 2
+        a_seat = i % 2 if swap_seats else 0
+        starting = a_seat if a_starts else 1 - a_seat
+        da, db = (deck_b, deck_a) if swapped else (deck_a, deck_b)
+        schedule.append(ScheduledGame(i, da, db, a_seat, starting, rng.randrange(2 ** 62)))
+    return schedule
+
+
 @dataclass
 class MatchResult:
-    """Outcome of a series of games between two players (``a`` and ``b``)."""
+    """Outcome of a series of games between two players (``a`` and ``b``).
+
+    Only games the engine finished count as wins or draws; games that were interrupted, stopped or
+    crashed count as ``errors`` and are excluded from scores and ratings.
+    """
     a: str
     b: str
     wins_a: int = 0
@@ -125,6 +230,9 @@ class MatchResult:
     draws: int = 0
     errors: int = 0
     games: List[GameResult] = field(default_factory=list)
+    #: the match seed (generated when none was given, so the schedule can be reproduced)
+    seed: Optional[int] = None
+    schedule: List[ScheduledGame] = field(default_factory=list)
 
     @property
     def played(self) -> int:
@@ -136,92 +244,103 @@ class MatchResult:
         n = self.wins_a + self.wins_b + self.draws
         return (self.wins_a + 0.5 * self.draws) / n if n else 0.5
 
+    def record(self, game: GameResult) -> None:
+        """Adds a game result (with ``a_seat``) to the tallies."""
+        self.games.append(game)
+        kind = outcome(game)
+        if kind == "unfinished":
+            self.errors += 1
+        elif kind == "draw":
+            self.draws += 1
+        elif game.get("winner_seat") == game.get("a_seat"):
+            self.wins_a += 1
+        else:
+            self.wins_b += 1
+
     def __str__(self) -> str:
         return (f"{self.a} vs {self.b}: {self.wins_a}-{self.wins_b}"
                 + (f" ({self.draws} draws)" if self.draws else "")
-                + (f" [{self.errors} errors]" if self.errors else "")
+                + (f" [{self.errors} unfinished]" if self.errors else "")
                 + f" over {self.played} games")
 
 
 def run_match(player_a: AgentSpec, player_b: AgentSpec, *, games: int = 10,
               decks: Union[str, Sequence[str], Sequence[Tuple[str, str]], None] = None,
-              server: str = DEFAULT_SERVER, swap_seats: bool = True, parallel: int = 1,
-              seed: Optional[int] = None, **game_options: Any) -> MatchResult:
-    """Plays a series of games.
+              server: str = DEFAULT_SERVER, swap_seats: bool = True, swap_decks: bool = False, parallel: int = 1,
+              seed: Optional[int] = None, client: Optional[ColosseoClient] = None,
+              **game_options: Any) -> MatchResult:
+    """Plays a series of games following :func:`match_schedule`.
 
-    ``decks``: one deck id (mirror), a list of deck ids (each game draws a random pair) or a list of
-    (deck_a, deck_b) pairs used in turn. Defaults to every deck on the server. With ``swap_seats``,
-    players alternate seats (and therefore who plays first half of the time).
-    Agent classes/factories get a fresh instance per game; agent instances are shared.
+    The schedule (deck pairings, seats, who starts, engine seeds) is computed up front from ``seed``, so
+    the same seed gives the same plan whatever ``parallel`` is; it is stored in ``MatchResult.schedule``
+    and every game result carries its ``index``, ``seed``, ``starting_seat``, ``a_seat`` and decks.
+    Use an even number of games so that A and B start equally often. ``decks`` defaults to every deck on
+    the server. Agent classes/factories get a fresh instance per game; agent instances are shared.
+
+    Gameplay itself is only best-effort reproducible: XMage shares one RNG between concurrent games and
+    its AI is time-bounded (see docs/agents.md).
+
+    Match games are created with ``require_tokens=True`` (unless you pass ``require_tokens=False``): even on
+    an open local server, an agent can then neither control nor watch the other seat with hands revealed.
     """
-    rng = random.Random(seed)
-    client = ColosseoClient(server)
+    game_options.setdefault("require_tokens", True)
+    client = client or ColosseoClient(server)
+    if seed is None:
+        seed = random.SystemRandom().randrange(2 ** 62)
     if decks is None:
-        decks = [d["id"] for d in client.decks()]
-    if isinstance(decks, str):
-        pairs = [(decks, decks)]
-    elif decks and isinstance(decks[0], (tuple, list)):
-        pairs = [tuple(p) for p in decks]  # type: ignore[misc]
-    else:
-        pairs = None
+        decks = sorted(d["id"] for d in client.decks())
+    plan = match_schedule(games, decks, seed=seed, swap_seats=swap_seats, swap_decks=swap_decks)
 
     name_a, name_b = _spec_name(player_a), _spec_name(player_b)
     if name_a == name_b:
         name_a, name_b = name_a + " (A)", name_b + " (B)"
-    match = MatchResult(name_a, name_b)
+    match = MatchResult(name_a, name_b, seed=seed, schedule=plan)
     lock = threading.Lock()
+    done: List[GameResult] = []
 
-    def one(i: int) -> None:
-        if pairs is not None:
-            deck_a, deck_b = pairs[i % len(pairs)]
-        else:
-            deck_a, deck_b = rng.choice(decks), rng.choice(decks)  # type: ignore[arg-type]
-        a_seat = (i % 2) if swap_seats else 0
-        players = [player_a, player_b] if a_seat == 0 else [player_b, player_a]
-        seat_decks = [deck_a, deck_b] if a_seat == 0 else [deck_b, deck_a]
-        seat_names = [name_a, name_b] if a_seat == 0 else [name_b, name_a]
+    def one(g: ScheduledGame) -> None:
+        players = [player_a, player_b] if g.a_seat == 0 else [player_b, player_a]
+        seat_decks = [g.deck_a, g.deck_b] if g.a_seat == 0 else [g.deck_b, g.deck_a]
+        seat_names = [name_a, name_b] if g.a_seat == 0 else [name_b, name_a]
         try:
             result = run_game(players[0], players[1], seat_decks[0], seat_decks[1], server=server,
-                              names=seat_names, **game_options)
+                              names=seat_names, seed=g.seed, starting_seat=g.starting_seat, client=client,
+                              **game_options)
         except Exception as e:  # noqa: BLE001
-            log.error("game %d failed: %s", i, e)
-            with lock:
-                match.errors += 1
-            return
-        result["a_seat"] = a_seat
+            log.error("game %d failed: %s", g.index, e)
+            result = {"status": "error", "error": str(e), "winner_seat": None, "draw": False}
+        # the engine reports the seed and starting seat it actually used; the plan is kept next to them
+        result.update({"index": g.index, "a_seat": g.a_seat, "deck_a": g.deck_a, "deck_b": g.deck_b,
+                       "seed": result.get("seed", g.seed), "planned_seed": g.seed,
+                       "starting_seat": result.get("starting_seat", g.starting_seat),
+                       "planned_starting_seat": g.starting_seat})
         with lock:
-            match.games.append(result)
-            winner = result.get("winner_seat")
-            if result.get("error"):
-                match.errors += 1
-            elif winner is None:
-                match.draws += 1
-            elif winner == a_seat:
-                match.wins_a += 1
-            else:
-                match.wins_b += 1
-        log.info("game %d/%d: %s", i + 1, games, match)
+            done.append(result)
+            log.info("game %d/%d done (%s)", len(done), games, outcome(result))
 
     if parallel <= 1:
-        for i in range(games):
-            one(i)
+        for g in plan:
+            one(g)
     else:
         with ThreadPoolExecutor(parallel) as pool:
-            list(pool.map(one, range(games)))
+            list(pool.map(one, plan))
+    for result in sorted(done, key=lambda r: r["index"]):
+        match.record(result)
     return match
 
 
 def elo_ratings(matches: Sequence[MatchResult], k: float = 24.0, base: float = 1500.0) -> Dict[str, float]:
-    """Sequential Elo over every game of the given matches (a simple leaderboard metric)."""
+    """Sequential Elo over every finished game of the given matches, in schedule order (a simple
+    leaderboard metric). Unfinished games (interrupted, stopped, crashed) never change ratings."""
     ratings: Dict[str, float] = {}
     for m in matches:
         ratings.setdefault(m.a, base)
         ratings.setdefault(m.b, base)
-        for g in m.games:
-            if g.get("error"):
+        for g in sorted(m.games, key=lambda r: r.get("index", 0)):
+            kind = outcome(g)
+            if kind == "unfinished":
                 continue
-            winner = g.get("winner_seat")
-            score_a = 0.5 if winner is None else (1.0 if winner == g.get("a_seat") else 0.0)
+            score_a = 0.5 if kind == "draw" else (1.0 if g.get("winner_seat") == g.get("a_seat") else 0.0)
             ra, rb = ratings[m.a], ratings[m.b]
             expected_a = 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
             ratings[m.a] = ra + k * (score_a - expected_a)
@@ -233,7 +352,10 @@ def round_robin(players: Dict[str, AgentSpec], *, games: int = 10, **match_optio
     """Every pair of players plays a match. Returns the matches and Elo ratings.
 
     ``players`` maps display names to specs, e.g. ``{"random": RandomAgent, "mad": "xmage:3"}``.
+    With a ``seed``, every pairing plays the same schedule (common random numbers).
     """
+    if match_options.get("seed") is None:
+        match_options["seed"] = random.SystemRandom().randrange(2 ** 62)
     matches = []
     for (name_a, spec_a), (name_b, spec_b) in itertools.combinations(players.items(), 2):
         m = run_match(spec_a, spec_b, games=games, **match_options)

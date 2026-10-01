@@ -3,6 +3,7 @@ package colosseo.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -56,6 +57,11 @@ public final class Decision {
      * Kind specific extra fields merged into the JSON (min/max, attackers, piles, ...).
      */
     public final JsonObject extra = new JsonObject();
+    /**
+     * Labels shown to opponents and ordinary spectators for options that refer to hidden information
+     * (cards in hand or library, face-down cards). Options not listed here are public.
+     */
+    public final Map<String, String> privateOptions = new HashMap<>();
     public Responder responder;
     /**
      * Answer used by timeouts / default policy.
@@ -83,6 +89,68 @@ public final class Decision {
 
     public boolean hasOption(String optionId) {
         return optionId != null && options.containsKey(optionId);
+    }
+
+    /**
+     * Marks an option as private: other players and ordinary spectators only see {@code publicLabel}.
+     */
+    public void markPrivate(String optionId, String publicLabel) {
+        privateOptions.put(optionId, publicLabel);
+    }
+
+    public boolean isPrivate(String optionId) {
+        return optionId != null && privateOptions.containsKey(optionId);
+    }
+
+    /**
+     * Label of an option for the acting seat ({@code full}) or for everyone else.
+     */
+    public String label(String optionId, boolean full) {
+        if (!full && privateOptions.containsKey(optionId)) {
+            return privateOptions.get(optionId);
+        }
+        JsonObject opt = options.get(optionId);
+        if (opt == null) {
+            // e.g. later ids of a multi-target answer: never echo raw object ids to other players
+            return full ? optionId : "another choice";
+        }
+        return Json.getString(opt, "label", optionId);
+    }
+
+    /**
+     * What opponents and ordinary spectators are told while this decision is pending. Prompts can name
+     * hidden cards ("Put Shock on the bottom?"), so they only see the kind of decision.
+     */
+    public String publicPrompt() {
+        switch (kind) {
+            case PRIORITY:
+                return "has priority";
+            case MULLIGAN:
+                return "is deciding whether to mulligan";
+            case TARGET:
+                return "is choosing";
+            case ABILITY:
+                return "is choosing an ability";
+            case MODE:
+                return "is choosing a mode";
+            case CHOICE:
+                return "is making a choice";
+            case TRIGGER_ORDER:
+                return "is ordering triggered abilities";
+            case AMOUNT:
+            case MULTI_AMOUNT:
+                return "is choosing a number";
+            case PILE:
+                return "is choosing a pile";
+            case MANA:
+                return "is paying mana";
+            case ATTACKERS:
+                return "is declaring attackers";
+            case BLOCKERS:
+                return "is declaring blockers";
+            default:
+                return "is deciding";
+        }
     }
 
     public static JsonObject choiceAction(String optionId) {

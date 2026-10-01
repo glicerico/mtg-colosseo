@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .agent import Agent, play
+from .agent import Agent, outcome, play
 from .client import ColosseoClient, DEFAULT_SERVER, SeatConnection
 from .protocol import Action, Decision
 
@@ -36,6 +36,7 @@ class ColosseoEnv:
         self.game_options = {"record": True, **game_options}
         self.conn: Optional[SeatConnection] = None
         self.game_id: Optional[str] = None
+        self.owner_token: Optional[str] = None
         self.result: Optional[Dict[str, Any]] = None
         self._opponent_thread: Optional[threading.Thread] = None
         self._decision: Optional[Decision] = None
@@ -54,6 +55,7 @@ class ColosseoEnv:
             raise ValueError("opponent must be an Agent or 'xmage[:skill]'")
         created = self.client.create_game([me, opp], **self.game_options)
         self.game_id = created["game_id"]
+        self.owner_token = created.get("owner_token")
         self.result = None
         if isinstance(self.opponent, Agent):
             token = created["seats"][1].get("token")
@@ -73,6 +75,7 @@ class ColosseoEnv:
         info: Dict[str, Any] = {"events": events, "game_id": self.game_id}
         if decision is None:
             info["result"] = self.result
+            info["outcome"] = outcome(self.result)  # "unfinished" results (lost connection, ...) give reward 0
             return None, self._reward(), True, info
         if decision.rejection:
             info["rejected"] = decision.rejection
@@ -82,14 +85,22 @@ class ColosseoEnv:
         events: List[Dict[str, Any]] = []
         assert self.conn is not None
         while True:
-            msg = self.conn.recv()
+            try:
+                msg = self.conn.recv()
+            except Exception as e:  # noqa: BLE001 - connection lost: the episode ends without a result
+                self.result = {"status": "interrupted", "error": f"connection lost: {e}", "winner_seat": None,
+                               "draw": False, "game_id": self.game_id}
+                self._decision = None
+                self._stop_server_game()
+                return None, events
             kind = msg.get("type")
             if kind == "decision":
                 if previous is not None and msg["decision_id"] == previous.id:
                     continue
                 self._decision = Decision(msg)
                 return self._decision, events
-            if kind == "error" and previous is not None and msg.get("decision_id") == previous.id:
+            if (kind == "error" and previous is not None and msg.get("decision_id") == previous.id
+                    and msg.get("code") != "stale"):
                 previous.rejection = msg.get("message")
                 self._decision = previous
                 return previous, events
@@ -100,17 +111,21 @@ class ColosseoEnv:
             events.append(msg)
 
     def _reward(self) -> float:
-        if not self.result or self.result.get("winner_seat") is None:
+        if outcome(self.result) != "win":
             return 0.0
-        return 1.0 if self.result["winner_seat"] == 0 else -1.0
+        return 1.0 if self.result["winner_seat"] == 0 else -1.0  # type: ignore[index]
+
+    def _stop_server_game(self) -> None:
+        if self.game_id:
+            try:
+                self.client.terminate(self.game_id, self.owner_token)
+            except Exception:  # noqa: BLE001
+                pass
 
     def close(self) -> None:
         if self.conn is not None:
-            if self._decision is not None and self.game_id:
-                try:
-                    self.client.terminate(self.game_id)
-                except Exception:  # noqa: BLE001
-                    pass
+            if self._decision is not None:
+                self._stop_server_game()
             self.conn.close()
             self.conn = None
         self._decision = None

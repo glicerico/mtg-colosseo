@@ -108,6 +108,15 @@ public final class DeckLibrary {
     /**
      * Loads a deck by spec: a deck id, a path to a .dck/.txt file, or "sealed:SET[:SEED]".
      */
+    private volatile boolean allowPaths = true;
+
+    /**
+     * Whether a deck may be given as a file path on the server (only sensible for trusted clients).
+     */
+    public void setAllowPaths(boolean allowPaths) {
+        this.allowPaths = allowPaths;
+    }
+
     public Deck load(String spec) {
         if (spec == null || spec.isEmpty()) {
             throw new IllegalArgumentException("no deck given");
@@ -120,9 +129,9 @@ public final class DeckLibrary {
             reload(); // decks may have been added since startup
             info = get(spec);
         }
-        Path file = info != null ? info.file : Path.of(spec);
-        if (!Files.exists(file)) {
-            throw new IllegalArgumentException("unknown deck: " + spec);
+        Path file = info != null ? info.file : allowPaths ? Path.of(spec) : null;
+        if (file == null || !Files.isRegularFile(file)) {
+            throw new IllegalArgumentException("unknown deck: " + spec + (allowPaths ? "" : " (deck file paths are disabled on this server)"));
         }
         StringBuilder errors = new StringBuilder();
         DeckCardLists lists = DeckImporter.importDeckFromFile(file.toString(), errors, false);

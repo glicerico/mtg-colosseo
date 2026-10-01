@@ -54,6 +54,10 @@ public final class GameSession {
 
     public final String id;
     public final GameConfig config;
+    /**
+     * Given to whoever created the game: allows revealing hands to a spectator and stopping the game.
+     */
+    public final String ownerToken = AccessPolicy.newToken();
     private final GameManager manager;
     final List<Seat> seats = new ArrayList<>();
     private final Map<UUID, Seat> seatByPlayer = new ConcurrentHashMap<>();
@@ -70,6 +74,12 @@ public final class GameSession {
     private volatile Game game;
     private volatile int finalTurn;
     private volatile JsonObject finalState;
+    private volatile JsonObject finalStateRevealed;
+    private final Map<Integer, JsonObject> finalSeatStates = new ConcurrentHashMap<>();
+    private volatile String stopOutcome;
+    private volatile String stopReason;
+    private long seed;
+    private int startingSeat = -1;
     private Thread thread;
     private final long createdAt = System.currentTimeMillis();
     private volatile long startedAt;
@@ -92,7 +102,7 @@ public final class GameSession {
             return t;
         });
         for (int i = 0; i < config.seats.size(); i++) {
-            seats.add(new Seat(i, config.seats.get(i), this, UUID.randomUUID().toString().replace("-", "").substring(0, 16)));
+            seats.add(new Seat(i, config.seats.get(i), this, AccessPolicy.newToken()));
         }
     }
 
@@ -116,9 +126,9 @@ public final class GameSession {
      * Creates players, loads decks and starts the game thread. Deck errors are reported synchronously.
      */
     void start() {
-        if (config.seed != null) {
-            RandomUtil.setSeed(config.seed);
-        }
+        // every game runs with a known seed (recorded in the config and the result) so it can be replayed
+        seed = config.seed != null ? config.seed : new java.security.SecureRandom().nextLong() & Long.MAX_VALUE;
+        RandomUtil.setSeed(seed);
         game = new TwoPlayerDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE,
                 MulliganType.GAME_DEFAULT.getMulligan(0), 40, config.startingLife, 7);
         GameOptions options = new GameOptions();
@@ -146,8 +156,8 @@ public final class GameSession {
         game.addTableEventListener((Listener<TableEvent>) this::onTableEvent);
         game.addPlayerQueryEventListener((Listener<PlayerQueryEvent>) this::onQuery);
 
-        int starting = config.startingSeat >= 0 ? config.startingSeat : RandomUtil.nextInt(seats.size());
-        game.setStartingPlayerId(seats.get(starting).playerId);
+        startingSeat = config.startingSeat >= 0 ? config.startingSeat : RandomUtil.nextInt(seats.size());
+        game.setStartingPlayerId(seats.get(startingSeat).playerId);
 
         openRecorder();
         record("config", configJson());
@@ -192,22 +202,34 @@ public final class GameSession {
             seat.pending.set(null);
             seat.cancelTimeout();
         }
-        JsonObject r = new JsonObject();
+        // only a game the rules engine ended by itself has a winner or is a draw; a stopped or crashed game
+        // has an explicit non-terminal outcome so that it is never scored
+        String outcome = stopOutcome != null ? stopOutcome : error != null ? "error" : "finished";
+        boolean finished = "finished".equals(outcome);
         Integer winner = null;
-        for (Seat seat : seats) {
-            if (seat.player != null && seat.player.hasWon()) {
-                winner = seat.index;
+        if (finished) {
+            for (Seat seat : seats) {
+                if (seat.player != null && seat.player.hasWon()) {
+                    winner = seat.index;
+                }
             }
         }
+        JsonObject r = new JsonObject();
+        r.addProperty("status", outcome);
         r.addProperty("winner_seat", winner);
         r.addProperty("winner", winner == null ? null : seats.get(winner).config().name);
-        r.addProperty("draw", winner == null && error == null);
+        r.addProperty("draw", finished && winner == null);
+        if (finished && winner == null && drawDeclared) {
+            r.addProperty("reason", "turn_limit");
+        } else if (!finished) {
+            r.addProperty("reason", stopReason != null ? stopReason : error);
+            r.addProperty("error", stopReason != null ? stopReason : error);
+        }
         r.addProperty("turns", game == null ? 0 : game.getTurnNum());
         r.addProperty("decisions", decisionCount.get());
         r.addProperty("duration_s", (endedAt - startedAt) / 1000.0);
-        if (error != null) {
-            r.addProperty("error", error);
-        }
+        r.addProperty("seed", seed);
+        r.addProperty("starting_seat", startingSeat);
         JsonArray players = new JsonArray();
         for (Seat seat : seats) {
             JsonObject p = new JsonObject();
@@ -217,14 +239,14 @@ public final class GameSession {
             p.addProperty("deck", seat.config().deck);
             if (seat.player != null) {
                 p.addProperty("life", seat.player.getLife());
-                p.addProperty("won", seat.player.hasWon());
-                p.addProperty("lost", seat.player.hasLost());
+                p.addProperty("won", finished && seat.player.hasWon());
+                p.addProperty("lost", finished && seat.player.hasLost());
             }
             players.add(p);
         }
         r.add("players", players);
         result = r;
-        status = error != null ? "error" : "finished";
+        status = outcome;
 
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "game_over");
@@ -233,31 +255,43 @@ public final class GameSession {
         record("result", r);
         closeRecorder();
 
+        // final views keep the usual hidden-information rules; they are cached for clients that attach later
+        // (the XMage game itself is released below)
         for (Seat seat : seats) {
             JsonObject m = msg.deepCopy();
-            try {
-                if (game != null && seat.hasConnections()) {
-                    m.add("state", StateView.build(game, seat.playerId, true, seatIndex));
-                }
-            } catch (RuntimeException e) {
-                LOG.debug("final state failed", e);
+            JsonObject state = safeState(seat.playerId, false);
+            if (state != null) {
+                finalSeatStates.put(seat.index, state);
+                m.add("state", state);
             }
             seat.broadcast(m);
         }
+        finalState = safeState(null, false);
+        finalStateRevealed = safeState(null, true);
         JsonObject specMsg = msg.deepCopy();
-        try {
-            if (game != null) {
-                // kept for viewers of finished games (the XMage game itself is released below)
-                finalState = StateView.build(game, null, true, seatIndex);
-                specMsg.add("state", finalState);
-            }
-        } catch (RuntimeException e) {
-            LOG.debug("final state failed", e);
+        JsonObject specRevealed = msg.deepCopy();
+        if (finalState != null) {
+            specMsg.add("state", finalState);
         }
-        broadcastSpectators(specMsg);
+        if (finalStateRevealed != null) {
+            specRevealed.add("state", finalStateRevealed);
+        }
+        broadcastSpectators(specRevealed, specMsg);
         responder.shutdown();
         releaseGame();
         manager.onFinished(this);
+    }
+
+    private JsonObject safeState(UUID viewer, boolean revealAll) {
+        if (game == null) {
+            return null;
+        }
+        try {
+            return StateView.build(game, viewer, revealAll, seatIndex);
+        } catch (RuntimeException e) {
+            LOG.debug("final state failed", e);
+            return null;
+        }
     }
 
     /**
@@ -279,20 +313,80 @@ public final class GameSession {
     }
 
     /**
-     * Stops a running game (both players leave).
+     * Stops a running game (both players leave). The result has status "terminated" and is never a draw.
      */
     public void terminate() {
+        stop("terminated", "terminated");
+    }
+
+    /**
+     * Stops a running game with an explicit non-terminal outcome ("terminated", "abandoned", "timeout").
+     */
+    void stop(String outcome, String reason) {
         if (game == null || !"running".equals(status)) {
             return;
         }
-        error = "terminated";
+        synchronized (this) {
+            if (stopOutcome != null) {
+                return;
+            }
+            stopOutcome = outcome;
+            stopReason = reason;
+        }
+        addLog("Game stopped: " + reason);
         for (Seat seat : seats) {
+            seat.cancelTimeout();
             if (seat.player != null) {
                 seat.player.abort();
             }
         }
         if (thread != null) {
             thread.interrupt();
+        }
+    }
+
+    /**
+     * Watchdog (timer thread): stops games past their deadline and games whose bridge seat has been
+     * disconnected longer than the abandon timeout, so that abandoned games release their resources.
+     */
+    void checkLiveness(long now, double defaultAbandonTimeoutS) {
+        if (!"running".equals(status)) {
+            return;
+        }
+        if (config.deadlineS > 0 && now - startedAt > config.deadlineS * 1000) {
+            stop("timeout", "deadline of " + fmt(config.deadlineS) + " s exceeded");
+            return;
+        }
+        double abandon = config.abandonTimeoutS != null ? config.abandonTimeoutS : defaultAbandonTimeoutS;
+        for (Seat seat : seats) {
+            if (!seat.config().isBridge()) {
+                continue;
+            }
+            if (seat.hasConnections()) {
+                seat.lastSeenAt = now;
+            } else if (abandon > 0 && now - seat.lastSeenAt > abandon * 1000) {
+                stop("abandoned", "seat " + seat.index + " (" + seat.config().name + ") disconnected for more than "
+                        + fmt(abandon) + " s");
+                return;
+            }
+        }
+    }
+
+    private static String fmt(double seconds) {
+        return seconds == Math.rint(seconds) ? String.valueOf((long) seconds) : String.valueOf(seconds);
+    }
+
+    /**
+     * Waits up to {@code millis} for the game thread to end (e.g. after {@link #terminate()}).
+     */
+    public void awaitEnd(long millis) {
+        Thread t = thread;
+        if (t != null && t != Thread.currentThread()) {
+            try {
+                t.join(millis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -467,8 +561,10 @@ public final class GameSession {
             note.addProperty("seat", seat.index);
             note.addProperty("decision_id", d.id);
             note.addProperty("kind", d.kind);
-            note.addProperty("prompt", d.prompt);
-            broadcastSpectators(note);
+            JsonObject revealed = note.deepCopy();
+            revealed.addProperty("prompt", d.prompt);
+            note.addProperty("prompt", d.publicPrompt());
+            broadcastSpectators(revealed, note);
             sendSpectatorStates();
         }
     }
@@ -480,11 +576,15 @@ public final class GameSession {
         Decision d = seat.pending.get();
         long did = Json.getLong(action, "decision_id", -1);
         String err = null;
+        // "stale": the answer is for a decision that is no longer pending (harmless, e.g. a resend after a
+        // reconnect); "invalid": the decision is pending and the answer was rejected (the client should retry)
+        String code = "stale";
         if (d == null) {
             err = "no decision pending for seat " + seat.index;
         } else if (did != d.id) {
             err = "stale decision_id " + did + " (pending: " + d.id + ")";
         } else {
+            code = "invalid";
             try {
                 err = d.responder.validate(action);
             } catch (RuntimeException e) {
@@ -492,11 +592,12 @@ public final class GameSession {
             }
         }
         if (err == null && !seat.pending.compareAndSet(d, null)) {
+            code = "stale";
             err = "decision " + did + " was already answered";
         }
         if (err != null) {
             if (from != null) {
-                from.sendError(err, did >= 0 ? did : null);
+                from.sendError(err, did >= 0 ? did : null, code);
             }
             return err;
         }
@@ -510,24 +611,33 @@ public final class GameSession {
             }
         });
 
+        // The acting seat (and spectators allowed to see hands) get the full acknowledgment; the opponent and
+        // ordinary spectators get a redacted one that never names hidden cards. Comments are the agent's
+        // private rationale unless the game makes them public.
+        String comment = Json.getString(action, "comment", null);
+        JsonObject full = ack(seat, d, summarize(d, action, true), comment);
+        JsonObject pub = ack(seat, d, summarize(d, action, false), config.publicComments ? comment : null);
+        seat.broadcast(full);
+        for (Seat other : seats) {
+            if (other != seat) {
+                other.broadcast(pub);
+            }
+        }
+        broadcastSpectators(full, pub);
+        return null;
+    }
+
+    private static JsonObject ack(Seat seat, Decision d, String summary, String comment) {
         JsonObject ack = new JsonObject();
         ack.addProperty("type", "action");
         ack.addProperty("seat", seat.index);
         ack.addProperty("decision_id", d.id);
         ack.addProperty("kind", d.kind);
-        ack.addProperty("summary", summarize(d, action));
-        String comment = Json.getString(action, "comment", null);
+        ack.addProperty("summary", summary);
         if (comment != null) {
             ack.addProperty("comment", comment);
         }
-        seat.broadcast(ack);
-        broadcastSpectators(ack);
-        for (Seat other : seats) {
-            if (other != seat) {
-                other.broadcast(ack);
-            }
-        }
-        return null;
+        return ack;
     }
 
     private JsonObject actionRecord(Seat seat, Decision d, JsonObject action) {
@@ -539,23 +649,24 @@ public final class GameSession {
         return r;
     }
 
-    private static String summarize(Decision d, JsonObject action) {
+    /**
+     * One-line description of an answer. {@code full=false} replaces private options (hidden cards) with
+     * their public labels, collapsing repeats ("2 x a hidden card").
+     */
+    static String summarize(Decision d, JsonObject action, boolean full) {
         StringBuilder sb = new StringBuilder();
-        if (action.has("choice")) {
-            String c = Json.getString(action, "choice", "");
-            JsonObject opt = d.options.get(c);
-            sb.append(opt == null ? c : Json.getString(opt, "label", c));
+        if (action.has("choice") && action.get("choice").isJsonPrimitive()) {
+            sb.append(d.label(Json.getString(action, "choice", ""), full));
         }
         if (action.has("choices") && action.get("choices").isJsonArray()) {
-            List<String> labels = new ArrayList<>();
+            List<String> ids = new ArrayList<>();
             for (JsonElement el : action.getAsJsonArray("choices")) {
-                JsonObject opt = d.options.get(el.getAsString());
-                labels.add(opt == null ? el.getAsString() : Json.getString(opt, "label", el.getAsString()));
+                ids.add(el.isJsonPrimitive() ? el.getAsString() : el.toString());
             }
-            sb.append(String.join(", ", labels));
+            sb.append(joinLabels(d, ids, full));
         }
         if (action.has("amount")) {
-            sb.append(action.get("amount").getAsInt());
+            sb.append(Json.getString(action, "amount", ""));
         }
         if (action.has("amounts")) {
             sb.append(action.get("amounts").toString());
@@ -565,13 +676,11 @@ public final class GameSession {
             if (arr.size() == 0) {
                 sb.append("no attack");
             } else {
-                List<String> labels = new ArrayList<>();
+                List<String> ids = new ArrayList<>();
                 for (JsonElement el : arr) {
-                    String a = Json.getString(el.getAsJsonObject(), "attacker", "");
-                    JsonObject opt = d.options.get(a);
-                    labels.add(opt == null ? a : Json.getString(opt, "label", a));
+                    ids.add(el.isJsonObject() ? Json.getString(el.getAsJsonObject(), "attacker", "") : el.getAsString());
                 }
-                sb.append("attack with ").append(String.join(", ", labels));
+                sb.append("attack with ").append(joinLabels(d, ids, full));
             }
         }
         if (action.has("blocks") && action.get("blocks").isJsonArray()) {
@@ -581,6 +690,22 @@ public final class GameSession {
         return sb.toString();
     }
 
+    private static String joinLabels(Decision d, List<String> ids, boolean full) {
+        List<String> labels = new ArrayList<>();
+        Map<String, Integer> hidden = new java.util.LinkedHashMap<>();
+        for (String optionId : ids) {
+            if (!full && d.isPrivate(optionId)) {
+                hidden.merge(d.label(optionId, false), 1, Integer::sum);
+            } else {
+                labels.add(d.label(optionId, full));
+            }
+        }
+        for (Map.Entry<String, Integer> e : hidden.entrySet()) {
+            labels.add(e.getValue() == 1 ? e.getKey() : e.getValue() + " x " + e.getKey());
+        }
+        return String.join(", ", labels);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // clients
     // ---------------------------------------------------------------------------------------------
@@ -588,9 +713,10 @@ public final class GameSession {
     void attachPlayer(Seat seat, Connection c) {
         c.seat = seat;
         seat.connections.add(c);
+        seat.lastSeenAt = System.currentTimeMillis();
         JsonObject hello = hello(seat.index);
         hello.addProperty("role", "player");
-        JsonObject state = finalState != null ? finalState : lastSeatState.get(seat.index);
+        JsonObject state = result != null ? finalSeatStates.get(seat.index) : lastSeatState.get(seat.index);
         if (state == null) {
             state = tryBuildState(seat.playerId, false);
         }
@@ -616,7 +742,10 @@ public final class GameSession {
         spectators.add(c);
         JsonObject hello = hello(-1);
         hello.addProperty("role", "spectator");
-        JsonObject state = finalState != null ? finalState : (c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState);
+        hello.addProperty("reveal", c.revealAll);
+        hello.addProperty("may_reveal", c.mayReveal);
+        JsonObject state = result != null ? (c.revealAll ? finalStateRevealed : finalState)
+                : (c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState);
         if (state == null) {
             state = tryBuildState(null, c.revealAll);
         }
@@ -637,7 +766,26 @@ public final class GameSession {
     void detach(Connection c) {
         spectators.remove(c);
         for (Seat seat : seats) {
-            seat.connections.remove(c);
+            if (seat.connections.remove(c)) {
+                seat.lastSeenAt = System.currentTimeMillis();
+            }
+        }
+    }
+
+    /**
+     * A spectator switched hands on or off: send the matching view right away.
+     */
+    void spectatorChanged(Connection c) {
+        JsonObject state = result != null ? (c.revealAll ? finalStateRevealed : finalState)
+                : (c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState);
+        if (state == null) {
+            state = tryBuildState(null, c.revealAll);
+        }
+        if (state != null) {
+            JsonObject msg = new JsonObject();
+            msg.addProperty("type", "state");
+            msg.add("state", state);
+            c.send(msg);
         }
     }
 
@@ -679,12 +827,20 @@ public final class GameSession {
     }
 
     private void broadcastSpectators(JsonObject msg) {
+        broadcastSpectators(msg, msg);
+    }
+
+    /**
+     * Sends {@code revealed} to spectators allowed to see hidden information and {@code normal} to the others.
+     */
+    private void broadcastSpectators(JsonObject revealed, JsonObject normal) {
         if (spectators.isEmpty()) {
             return;
         }
-        String text = Json.GSON.toJson(msg);
+        String revealedText = Json.GSON.toJson(revealed);
+        String normalText = revealed == normal ? revealedText : Json.GSON.toJson(normal);
         for (Connection c : spectators) {
-            c.send(text);
+            c.send(c.revealAll ? revealedText : normalText);
         }
     }
 
@@ -720,6 +876,8 @@ public final class GameSession {
     private JsonObject configJson() {
         JsonObject o = config.toJson();
         o.addProperty("game_id", id);
+        o.addProperty("seed", seed);
+        o.addProperty("starting_seat_actual", startingSeat);
         JsonArray players = new JsonArray();
         for (Seat seat : seats) {
             JsonObject p = new JsonObject();

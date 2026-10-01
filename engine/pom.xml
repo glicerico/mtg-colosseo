@@ -80,10 +80,6 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
-                <configuration>
-                    <!-- engine tests play real games; keep them opt-in: mvn test -DskipTests=false -->
-                    <skipTests>${skipEngineTests}</skipTests>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -120,17 +116,4 @@
         </plugins>
     </build>
 
-    <profiles>
-        <profile>
-            <id>default-skip-tests</id>
-            <activation>
-                <property>
-                    <name>!skipEngineTests</name>
-                </property>
-            </activation>
-            <properties>
-                <skipEngineTests>true</skipEngineTests>
-            </properties>
-        </profile>
-    </profiles>
 </project>

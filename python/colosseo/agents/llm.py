@@ -2,8 +2,9 @@
 
 Each decision becomes one Messages API call: the board rendered as text, the recent game log and the
 question with its legal options. Structured outputs constrain the answer to the legal option ids, so the
-model can't answer with an illegal move. The model's one-line comment is attached to the action and shown
-to spectators in the web UI.
+model can't answer with an illegal move. The model's one-line comment is attached to the action; the
+server shows it to spectators allowed to see hidden information (never to the opponent, unless the game
+was created with ``public_comments``).
 
 Requires ``pip install anthropic`` and credentials (``ANTHROPIC_API_KEY`` or an ``ant auth login`` profile).
 """
@@ -26,7 +27,7 @@ a rules engine that asks you one decision at a time. Play to win.
 How decisions work:
 - Each request shows the board from your point of view, the recent game log, and one decision with its legal options.
 - Answer with the JSON schema provided. Use option ids exactly as given; they are the only legal answers.
-- "comment" is one short sentence explaining your move to spectators.
+- "comment" is one short sentence explaining your move to authorized spectators (your opponent never sees it).
 
 Decision kinds:
 - priority: cast a spell / play a land / activate an ability (by option id), or "pass". Passing with an empty stack moves the game to the next step; passing with objects on the stack lets the top one resolve. Mana is paid automatically. You get priority again after each action, so play one thing at a time. Play a land every turn when you can.
@@ -74,27 +75,36 @@ class ClaudeAgent(Agent):
         self.max_tokens = max_tokens
         self.server_fallbacks = server_fallbacks
         self.history: List[str] = []
+        self._log_seen: set = set()
         self.calls = 0
 
     # --- game hooks ---------------------------------------------------------------------------
 
     def on_game_start(self, info: Dict[str, Any]) -> None:
-        self.history = [f"T{e.get('turn')}: {e.get('text')}" for e in info.get("log", [])]
+        self.history = []
+        self._log_seen = set()
+        for e in info.get("log", []):
+            self._add_log(e)
 
     def on_event(self, message: Dict[str, Any]) -> None:
+        # Only the engine's game log enters the prompt. Opponent actions arrive redacted and opponent
+        # comments are deliberately ignored: they are free text written by the other side.
         if message.get("type") == "log":
-            e = message.get("entry", {})
-            self.history.append(f"T{e.get('turn')}: {e.get('text')}")
-        elif message.get("type") == "action" and message.get("comment"):
-            self.history.append(f"(opponent note: {message['comment']})")
+            self._add_log(message.get("entry", {}))
+
+    def _add_log(self, e: Dict[str, Any]) -> None:
+        key = e.get("i")
+        if key is not None:
+            if key in self._log_seen:
+                return  # delivered both as a log event and with a decision
+            self._log_seen.add(key)
+        self.history.append(f"T{e.get('turn')}: {e.get('text')}")
 
     # --- decisions ----------------------------------------------------------------------------
 
     def decide(self, d: Decision) -> Action:
         for e in d.log:
-            line = f"T{e.get('turn')}: {e.get('text')}"
-            if not self.history or self.history[-1] != line:
-                self.history.append(line)
+            self._add_log(e)
         if self.trivial_to_fallback and self._trivial(d):
             return self.fallback.decide(d)
         try:

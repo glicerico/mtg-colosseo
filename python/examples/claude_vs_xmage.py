@@ -9,7 +9,8 @@ from colosseo import run_game
 from colosseo.agents import ClaudeAgent
 
 logging.basicConfig(level=logging.INFO)
-agent = ClaudeAgent(effort="medium")   # every decision is one API call; comments show up in the game log
+agent = ClaudeAgent(effort="medium")   # every decision is one API call
+# the owner link shows both hands and Claude's comments (other spectators and the opponent don't get them)
 result = run_game(agent, "xmage:2", "fdn:azorius-skies", "fdn:gruul-stompers",
-                  on_created=lambda g: print(f"watch: http://localhost:7070/#/watch/{g['game_id']}"))
+                  on_created=lambda g: print(f"watch: http://localhost:7070{g['owner_url']}"))
 print(result, f"({agent.calls} API calls)")

@@ -40,6 +40,10 @@ public final class Seat {
     String lastDecisionKey;
     int repeatCount;
 
+    /**
+     * Last time a client was attached (for abandoned-game detection).
+     */
+    volatile long lastSeenAt = System.currentTimeMillis();
     private volatile int passTurnNumber = -1;
     private volatile String info;
     private volatile ScheduledFuture<?> timeoutTask;
