@@ -153,6 +153,24 @@ def play(agent: Agent, game_id: str, seat: int, server: str = DEFAULT_SERVER,
         delay = min(delay * 2, 5.0)
 
 
+def _advances_game(msg: Dict[str, Any], answered: Dict[int, Dict[str, Any]], state: Dict[str, Any]) -> bool:
+    """Whether a message shows the game moved on: a decision we haven't answered yet, an accepted action
+    (either seat) or a game-log entry we haven't seen. Replays, errors and state snapshots don't count."""
+    kind = msg.get("type")
+    if kind == "decision":
+        return msg.get("decision_id") not in answered
+    if kind == "action":
+        return True
+    if kind == "log":
+        i = (msg.get("entry") or {}).get("i")
+        if isinstance(i, int):
+            if i <= state.get("log_seen", -1):
+                return False
+            state["log_seen"] = i
+        return True
+    return False
+
+
 class _TransportError(Exception):
     """Sending on the seat connection failed (as opposed to an error in the agent's own code)."""
 
@@ -175,9 +193,9 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
     this_connection: set = set()
     for msg in conn.messages():
         kind = msg.get("type")
-        if kind != "hello":
-            # game traffic after the handshake: this connection was usable (a socket that only says hello
-            # and drops doesn't count, so a flapping server still exhausts the recovery window)
+        if _advances_game(msg, answered, state):
+            # only real game progress earns a later outage a fresh recovery window: a socket that says hello,
+            # replays the decision we already answered and drops again must still exhaust the window
             state["progress"] = True
         if kind == "decision":
             did = msg["decision_id"]
@@ -210,6 +228,10 @@ def _session(agent: Agent, conn, seat: int, answered: Dict[int, Dict[str, Any]],
             else:
                 log.debug("seat %s: server error: %s", seat, msg.get("message"))
         elif kind == "hello":
+            # the log tail replayed on (re)connect is history, not progress on this connection
+            seen = [e.get("i") for e in msg.get("log") or [] if isinstance(e.get("i"), int)]
+            if seen:
+                state["log_seen"] = max(state.get("log_seen", -1), max(seen))
             if not state["started"]:
                 state["started"] = True
                 agent.on_game_start(msg)

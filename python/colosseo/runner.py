@@ -160,17 +160,30 @@ def run_game(player0: AgentSpec, player1: AgentSpec, deck0: str, deck1: Optional
     return result
 
 
-def _reconcile(client: ColosseoClient, game_id: str, owner_token: Optional[str]) -> Tuple[Optional[GameResult], Optional[str]]:
+def _reconcile(client: ColosseoClient, game_id: str, owner_token: Optional[str],
+               settle_s: float = 10.0) -> Tuple[Optional[GameResult], Optional[str]]:
     """After a seat failed: returns the server's terminal result if the game finished after all, otherwise
-    stops the still-running server game. Returns (terminal result or None, server status)."""
+    stops the still-running server game. Returns (terminal result or None, server status).
+
+    The game can finish on its own between the status check and the stop request, so the stop response
+    (and, if it isn't conclusive yet, a few more status checks within ``settle_s``) decides: a finished
+    result is kept, a stopped game stays unfinished, and an unconfirmed stop is reported as
+    ``"stop_requested"`` rather than assumed.
+    """
     try:
         info = client.game(game_id)
-        if info.get("result") and is_terminal(info["result"]):
-            return dict(info["result"]), info.get("status")
-        if info.get("status") in ("running", "created"):
-            client.terminate(game_id, owner_token)
-            return None, "terminated"
-        return None, info.get("status")
+        if not info.get("result") and info.get("status") in ("running", "created"):
+            info = client.terminate(game_id, owner_token) or {}
+            give_up = time.monotonic() + settle_s
+            while not info.get("result") and time.monotonic() < give_up:
+                time.sleep(0.5)
+                info = client.game(game_id)
+        result = info.get("result")
+        if result and is_terminal(result):
+            return dict(result), info.get("status")
+        if result:
+            return None, result.get("status") or info.get("status")
+        return None, "stop_requested" if info.get("status") in ("running", "created", None) else info.get("status")
     except ColosseoError as e:
         log.warning("game %s: can't reconcile with the server: %s", game_id, e)
         return None, None

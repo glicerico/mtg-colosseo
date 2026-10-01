@@ -327,7 +327,10 @@ public final class GameSession {
             return;
         }
         synchronized (this) {
-            if (stopOutcome != null) {
+            Game g = game;
+            // a game the rules engine already ended keeps its real result (the game thread may still be
+            // finishing up when a stop request arrives)
+            if (stopOutcome != null || g == null || g.hasEnded()) {
                 return;
             }
             stopOutcome = outcome;
