@@ -12,20 +12,29 @@ from colosseo.runner import MatchResult
 # --- fakes -------------------------------------------------------------------------------------
 
 class FakeConn:
-    def __init__(self, messages, close_code=None, close_reason=""):
+    """Yields its messages (callables are run as side effects, e.g. advancing a fake clock)."""
+
+    def __init__(self, messages, close_code=None, close_reason="", send_error=None):
         self._messages = list(messages)
         self.sent = []
         self.close_code = close_code
         self.close_reason = close_reason
+        self.send_error = send_error
 
     def messages(self):
-        yield from self._messages
+        for m in self._messages:
+            if callable(m):
+                m()
+            else:
+                yield m
 
     @property
     def refused(self):
         return self.close_code in (4001, 4003, 4004)
 
     def send(self, msg):
+        if self.send_error:
+            raise self.send_error
         self.sent.append(msg)
 
     def close(self):
@@ -33,7 +42,8 @@ class FakeConn:
 
 
 class FakeClient:
-    def __init__(self, connections, game_infos):
+    def __init__(self, connections, game_infos, connection_factory=None):
+        self.connection_factory = connection_factory
         self.connections = list(connections)
         self.game_infos = list(game_infos)
         self.connects = 0
@@ -41,6 +51,8 @@ class FakeClient:
 
     def connect_seat(self, game_id, seat, token=None):
         self.connects += 1
+        if not self.connections and self.connection_factory:
+            return self.connection_factory()
         if not self.connections:
             raise ColosseoError("connection refused")
         return self.connections.pop(0)
@@ -152,6 +164,148 @@ def test_refused_connection_is_an_error_without_retries():
     result = play(agent, "g1", 0, client=client, reconnect_timeout=30)
     assert result["status"] == "error" and "bad token" in result["error"]
     assert client.connects == 1
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    import colosseo.agent as agent_module
+    c = FakeClock()
+    monkeypatch.setattr(agent_module, "time", c)
+    return c
+
+
+def test_send_failure_reconnects_and_resends_the_cached_answer(raw_decisions):
+    """Review R1: the socket dies while the agent is deciding."""
+    d = decision_msg(raw_decisions["priority"], 11)
+    first = FakeConn([{"type": "hello", "game": RUNNING}, d], send_error=ConnectionError("socket closed while deciding"))
+    second = FakeConn([{"type": "hello", "game": RUNNING}, d, {"type": "game_over", "result": FINISHED}])
+    client = FakeClient([first, second], [RUNNING])
+    agent = CountingAgent()
+    result = play(agent, "g1", 0, client=client, reconnect_timeout=5)
+    assert result == FINISHED
+    assert client.connects == 2
+    assert agent.decided == [11]  # asked once; the cached answer was re-sent
+    assert second.sent and second.sent[0]["decision_id"] == 11
+    assert agent.ended == [FINISHED]
+
+
+def test_send_failure_without_recovery_is_interrupted(raw_decisions, clock):
+    d = decision_msg(raw_decisions["priority"], 12)
+    first = FakeConn([d], send_error=ConnectionError("broken pipe"))
+    agent = CountingAgent()
+    result = play(agent, "g1", 0, client=FakeClient([first], [RUNNING]), reconnect_timeout=5)
+    assert result["status"] == "interrupted"
+    assert agent.ended == [result]
+
+
+def test_separate_outages_each_get_a_fresh_recovery_window(raw_decisions, clock):
+    """Review R3: a second outage long after the first one recovered must still be retried."""
+    def later():
+        clock.now += 20
+    conns = [
+        FakeConn([]),  # outage 1 at t=0
+        FakeConn([{"type": "hello", "game": RUNNING}, decision_msg(raw_decisions["priority"], 1), later]),  # outage 2 at t~20
+        FakeConn([{"type": "hello", "game": RUNNING}, {"type": "game_over", "result": FINISHED}]),
+    ]
+    client = FakeClient(conns, [RUNNING])
+    agent = CountingAgent()
+    result = play(agent, "g1", 0, client=client, reconnect_timeout=5)
+    assert result == FINISHED
+    assert client.connects == 3
+    assert agent.ended == [FINISHED]
+
+
+def test_connections_without_progress_still_exhaust_the_window(clock):
+    client = FakeClient([], [RUNNING], connection_factory=lambda: FakeConn([{"type": "hello", "game": RUNNING}]))
+    agent = CountingAgent()
+    result = play(agent, "g1", 0, client=client, reconnect_timeout=5)
+    assert result["status"] == "interrupted"
+    assert client.connects < 20
+    assert agent.ended == [result]
+
+
+# --- run_game cleanup ----------------------------------------------------------------------------
+
+class GameClient:
+    """A server with one running game; terminate() ends it."""
+
+    def __init__(self, finished_result=None):
+        self.ended = threading.Event()
+        self.terminated = []
+        self.finished_result = finished_result
+
+    def create_game(self, seats, **options):
+        return {"game_id": "g1", "owner_token": "owner",
+                "seats": [{"seat": i, "type": s["type"], "token": f"t{i}"} for i, s in enumerate(seats)]}
+
+    def game(self, game_id):
+        if self.finished_result:
+            return {"status": "finished", "result": self.finished_result}
+        if self.ended.is_set():
+            return {"status": "terminated", "result": {"status": "terminated", "winner_seat": None, "draw": False}}
+        return dict(RUNNING)
+
+    def terminate(self, game_id, token=None):
+        self.terminated.append(token)
+        self.ended.set()
+        return {}
+
+
+def _blocked_peer(server):
+    """Seat 1 keeps waiting for a move until the server ends the game."""
+    def peer():
+        if not server.ended.wait(30):
+            return {"status": "finished", "winner_seat": 1, "draw": False}  # would only happen if cleanup hung
+        return {"status": "terminated", "winner_seat": None, "draw": False, "error": "terminated"}
+    return peer
+
+
+@pytest.mark.parametrize("failure", ["interrupted", "exception"])
+def test_failed_seat_stops_the_game_without_waiting_for_the_peer(monkeypatch, failure):
+    """Review R2: cleanup must not wait for the surviving seat (which waits for the failed one)."""
+    import time as real_time
+    server = GameClient()
+    peer = _blocked_peer(server)
+
+    def fake_play(agent, game_id, seat, *args, **kwargs):
+        if seat == 1:
+            return peer()
+        if failure == "exception":
+            raise RuntimeError("on_event hook crashed")
+        return {"status": "interrupted", "winner_seat": None, "draw": False, "error": "connection lost"}
+
+    monkeypatch.setattr(runner, "play", fake_play)
+    t0 = real_time.monotonic()
+    result = runner.run_game(CountingAgent(), CountingAgent(), "d", client=server, reconnect_timeout=5)
+    assert real_time.monotonic() - t0 < 10
+    assert server.terminated == ["owner"]
+    assert outcome(result) == "unfinished"
+    assert result["status"] == ("interrupted" if failure == "interrupted" else "error")
+
+
+def test_game_that_finished_meanwhile_is_kept(monkeypatch):
+    server = GameClient(finished_result=FINISHED)
+
+    def fake_play(agent, game_id, seat, *args, **kwargs):
+        if seat == 0:
+            return {"status": "interrupted", "winner_seat": None, "draw": False, "error": "connection lost"}
+        return dict(FINISHED)
+
+    monkeypatch.setattr(runner, "play", fake_play)
+    result = runner.run_game(CountingAgent(), CountingAgent(), "d", client=server, reconnect_timeout=5)
+    assert server.terminated == []
+    assert {k: result[k] for k in FINISHED} == FINISHED and result["game_id"] == "g1"
 
 
 # --- scoring -----------------------------------------------------------------------------------
