@@ -110,19 +110,22 @@ def test_turn_limit_can_be_void(client):
     assert r["status"] == "turn_limit" and outcome(r) == "unfinished"
 
 
-def test_time_bank_forfeits(client):
-    """#7: a seat that runs out of its time bank loses the game."""
+@pytest.mark.parametrize("seed", [9, 11, 21])
+def test_time_bank_forfeits(client, seed):
+    """#7: a seat that runs out of its time bank loses the game. Seeds 9 and 11 hit the clock while the seat is in
+    a dialog XMage doesn't interrupt on concession (they used to hang the game)."""
     class Slow(HeuristicAgent):
+        seat_options = {"time_bank_s": 1.0}
+
         def decide(self, d):
             time.sleep(0.7)
             return super().decide(d)
 
-    slow = HeuristicAgent()
-    slow.seat_options = {"time_bank_s": 1.0}
-    slow.decide = Slow().decide
-    r = run_game(slow, HeuristicAgent(), *FDN, server=SERVER, starting_seat=0, max_turns=20, record=False)
-    assert r["status"] == "finished" and r["winner_seat"] == 1
-    assert r["reason"] == "forfeit" and r["forfeit_seat"] == 0 and r["forfeit_reason"] == "time"
+    r = run_game(Slow(), HeuristicAgent(), *FDN, server=SERVER, starting_seat=0, max_turns=20, record=False,
+                 seed=seed, deadline_s=60)
+    assert r["status"] == "finished", r
+    assert r["winner_seat"] == 1 and r["reason"] == "forfeit"
+    assert r["forfeit_seat"] == 0 and r["forfeit_reason"] == "time"
     assert r["players"][0]["clock_used_s"] >= 1.0
 
 
@@ -190,12 +193,78 @@ def test_rated_games_feed_the_leaderboard(client):
 
 
 def test_same_seed_replays_the_same_game(client):
-    """#12: shuffles and option order come from the seed, even with games running side by side."""
+    """#12: shuffles and option order come from the seed, even with games running side by side.
+    Compares the whole game - every decision (kind, prompt, options) and every action - not just the totals."""
+    import re
+
+    def norm(text):
+        return re.sub(r"\[[0-9a-f]{3}\]", "", text or "")  # XMage shows short object ids in names
+
     def game(seed):
-        r = run_game(RandomAgent(seed=1), HeuristicAgent(), *FDN, server=SERVER, seed=seed, starting_seat=0,
-                     max_turns=10, record=False)
-        return r["turns"], r["decisions"], tuple(p["life"] for p in r["players"]), r["winner_seat"]
+        box = {}
+        run_game(RandomAgent(seed=1), HeuristicAgent(), *FDN, server=SERVER, seed=seed, starting_seat=0,
+                 max_turns=10, record=True, on_created=box.update, client=client)
+        trace = []
+        for line in client.record(box["game_id"], token=box["owner_token"]):
+            data = line["data"]
+            if line["type"] == "decision":
+                trace.append(("D", data["seat"], data["kind"], norm(data["prompt"]),
+                              tuple(norm(o["label"]) for o in data["options"])))
+            elif line["type"] == "action":
+                trace.append(("A", data["seat"], norm(data["summary"])))
+            elif line["type"] == "result":
+                trace.append(("R", data["winner_seat"], data["turns"], tuple(p["life"] for p in data["players"])))
+        return trace
 
     with ThreadPoolExecutor(4) as pool:
         a1, b1, a2, b2 = pool.map(game, [21, 22, 21, 22])
-    assert a1 == a2 and b1 == b2
+    assert len(a1) > 20 and a1 == a2 and b1 == b2
+    assert a1 != b1
+
+
+def test_unrecorded_rated_games_are_persisted(client):
+    """Rated results are written to the ratings ledger even without a game record."""
+    tag = uuid.uuid4().hex[:6]
+
+    class A(HeuristicAgent):
+        name, version = f"ledger-{tag}", "1"
+
+    class B(HeuristicAgent):
+        name, version = f"ledger-{tag}", "2"
+
+    r = run_game(A(), B(), *FDN, server=SERVER, max_turns=2, record=False, rated=True)
+    assert r["rating_persisted"] is True
+    board = {row["agent_id"]: row for row in client.leaderboard()["ratings"]}
+    assert board[f"ledger-{tag}@1"]["games"] == 1
+
+
+class CrashOnBlocks(HeuristicAgent):
+    name = "crash-on-blocks"
+
+    def decide(self, d):
+        if d.kind == "declare_blockers":
+            raise RuntimeError("policy bug while blocking")
+        return super().decide(d)
+
+
+class SlowOnBlocks(HeuristicAgent):
+    name = "slow-on-blocks"
+    seat_options = {"time_bank_s": 1.0}
+
+    def decide(self, d):
+        if d.kind == "declare_blockers":
+            time.sleep(1.5)
+        return super().decide(d)
+
+
+@pytest.mark.parametrize("defender,on_error,reason", [(CrashOnBlocks, "forfeit", "agent_error"),
+                                                       (SlowOnBlocks, "default", "time")])
+def test_forfeit_outside_priority_ends_the_game(client, defender, on_error, reason):
+    """A seat that forfeits while answering a non-priority dialog (blocks during the opponent's attack) must not
+    leave the game waiting for that dialog."""
+    t0 = time.monotonic()
+    r = run_game(AllOutAttacker(), defender(), MENACE_DECK, MENACE_DECK, server=SERVER, starting_seat=0,
+                 max_turns=12, record=False, seed=3, deadline_s=90, on_error=on_error, reconnect_timeout=10)
+    assert time.monotonic() - t0 < 60
+    assert r["status"] == "finished", r
+    assert r["forfeit_seat"] == 1 and r["forfeit_reason"] == reason and r["winner_seat"] == 0

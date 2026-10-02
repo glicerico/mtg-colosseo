@@ -54,7 +54,7 @@ public final class GameManager {
         this.dataDir = dataDir;
         this.maxRunning = maxRunning;
         this.defaultAbandonTimeoutS = defaultAbandonTimeoutS;
-        leaderboard.load(dataDir.resolve("games"));
+        leaderboard.load(dataDir);
         timers.scheduleWithFixedDelay(this::checkLiveness, 5, 5, java.util.concurrent.TimeUnit.SECONDS);
     }
 

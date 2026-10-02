@@ -13,7 +13,7 @@ dependencies = ["websockets>=12"]
 
 [project.optional-dependencies]
 llm = ["anthropic"]
-dev = ["pytest"]
+dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]
 colosseo = "colosseo.cli:main"
@@ -24,3 +24,5 @@ include = ["colosseo*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: needs a running Colosseo server (COLOSSEO_SERVER, default http://localhost:7070)"]
+# with pytest-timeout installed (the dev extra): a hung test fails after 5 minutes instead of stalling CI
+timeout = 300

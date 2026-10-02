@@ -281,6 +281,39 @@ def test_acknowledged_resend_counts_as_progress(raw_decisions, clock):
     assert agent.decided == [31] and agent.ended == [FINISHED]
 
 
+class AlwaysCrashing(CountingAgent):
+    def decide(self, d):
+        self.decided.append(d.id)
+        raise RuntimeError("policy bug")
+
+
+def test_strict_forfeit_is_cached_and_bounded(raw_decisions, clock):
+    """Latest review R6: a failed concession send must not re-ask the agent or reset the recovery window."""
+    d = decision_msg(raw_decisions["priority"], 41)
+    client = FakeClient([], [RUNNING], connection_factory=lambda: FakeConn(
+        [{"type": "hello", "game": RUNNING}, d], send_error=ConnectionError("reset")))
+    agent = AlwaysCrashing()
+    result = play(agent, "g1", 0, client=client, reconnect_timeout=2, on_error="forfeit")
+    assert result["status"] == "interrupted"
+    assert client.connects < 15 and clock.now <= 3
+    assert agent.decided == [41]          # asked once
+    assert agent.ended == [result]
+
+
+def test_strict_forfeit_is_resent_after_reconnect(raw_decisions):
+    d = decision_msg(raw_decisions["priority"], 42)
+    forfeited = {"status": "finished", "winner_seat": 1, "draw": False, "reason": "forfeit", "forfeit_seat": 0,
+                 "forfeit_reason": "agent_error"}
+    first = FakeConn([{"type": "hello", "game": RUNNING}, d], send_error=ConnectionError("reset"))
+    second = FakeConn([{"type": "hello", "game": RUNNING}, d, {"type": "game_over", "result": forfeited}])
+    agent = AlwaysCrashing()
+    result = play(agent, "g1", 0, client=FakeClient([first, second], [RUNNING]), reconnect_timeout=5, on_error="forfeit")
+    assert result == forfeited
+    assert agent.decided == [42]
+    assert second.sent == [{"type": "concede", "reason": "agent_error"}]
+    assert agent.ended == [forfeited]
+
+
 # --- run_game cleanup ----------------------------------------------------------------------------
 
 class GameClient:

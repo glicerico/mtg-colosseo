@@ -56,6 +56,35 @@ public class RecordsAndLeaderboardTest {
     }
 
     @Test
+    public void ratedResultsSurviveARestartWithoutGameRecords() throws Exception {
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("colosseo-ledger");
+        Leaderboard before = new Leaderboard();
+        before.load(dir);
+        assertTrue(before.addRated("g1", 1, result("finished", 0, false, "a@1", "b@1")));
+        assertTrue(before.addRated("g2", 2, result("finished", null, true, "a@1", "b@1")));
+        assertTrue(before.addRated("g3", 3, result("abandoned", null, false, "a@1", "b@1")));
+        Leaderboard after = new Leaderboard(); // a restart: no game records, only the ledger
+        after.load(dir);
+        assertEquals(Json.GSON.toJson(before.table()), Json.GSON.toJson(after.table()));
+        assertEquals(3, after.table().get("rated_games").getAsInt());
+        assertEquals(0, after.table().get("unpersisted").getAsInt());
+        // the same game found in the ledger and in an old record counts once
+        after.add("g1", 1, result("finished", 0, false, "a@1", "b@1"));
+        assertEquals(3, after.table().get("rated_games").getAsInt());
+    }
+
+    @Test
+    public void aLedgerWriteFailureIsSurfaced() throws Exception {
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("colosseo-ledger");
+        java.nio.file.Files.createDirectory(dir.resolve("ratings.jsonl")); // not writable as a file
+        Leaderboard board = new Leaderboard();
+        board.load(dir);
+        assertFalse(board.addRated("g1", 1, result("finished", 0, false, "a@1", "b@1")));
+        assertEquals(1, board.table().get("unpersisted").getAsInt());
+        assertEquals(1, board.table().get("rated_games").getAsInt());
+    }
+
+    @Test
     public void leaderboardScoresOnlyFinishedGames() {
         Leaderboard board = new Leaderboard();
         board.add("g1", 1, result("finished", 0, false, "a@1", "b@1"));
