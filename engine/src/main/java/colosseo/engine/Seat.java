@@ -52,7 +52,10 @@ public final class Seat {
      * Thinking time used so far (time bank), and when the pending decision was published.
      */
     volatile double clockUsedS;
-    volatile long askedAtMs;
+    /**
+     * System.nanoTime() when the pending decision was published (monotonic, for the time bank)
+     */
+    volatile long askedAtNanos;
     private volatile ScheduledFuture<?> clockTask;
 
     void countFallback(String reason) {

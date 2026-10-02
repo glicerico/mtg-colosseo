@@ -108,7 +108,10 @@ to put the games on the server's leaderboard.
 
 Per-game limits (game options): `max_decisions` (default 10000) and `max_record_mb` (100) stop runaway
 games as void (`status: "limit"`); `turn_limit_result="void"` makes reaching `max_turns` void instead of a
-draw; a seat's `time_bank_s` (in `seat_options`) is a chess clock - running out forfeits the game.
+draw; a seat's `time_bank_s` (in `seat_options`) is a chess clock - running out forfeits the game. Strict-mode
+concessions survive reconnects like answers do: a replayed decision gets the concession again, the agent is
+never asked twice. Rated results are kept in a ratings ledger, so the leaderboard survives restarts even for
+games played with `record=False`.
 
 When the engine refuses a whole declaration (e.g. a menace attacker blocked by a single creature), it asks again
 with `d.rejection` explaining why; `declare_blockers` decisions list each attacker's `min_blockers`, and every
@@ -147,7 +150,7 @@ The opponent can also be an `Agent` (self-play: it runs in a background thread).
 
 Every game writes `data/games/<id>.jsonl` on the server: a `config` line (with the engine, XMage, deck and
 agent versions), then alternating `decision` (the full message, including the observation) and `action`
-lines (plus `fallback` lines), then `result`. That is a complete (observation, legal options, chosen action)
+lines (plus `fallback` lines), then `result`; every action line precedes the decision it leads to. That is a complete (observation, legal options, chosen action)
 trace for both seats - convenient for behaviour cloning from XMage's AI or from human play.
 
 A full record contains both players' hidden information. To give an agent its own games, export one seat's

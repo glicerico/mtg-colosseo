@@ -281,9 +281,13 @@ def _answer(agent: Agent, conn, decision: Decision, answered: Dict[int, Dict[str
     except Exception:  # never let a buggy agent freeze the game
         log.error("agent %s failed on %r:\n%s", getattr(agent, "name", agent), decision, traceback.format_exc())
         if state.get("on_error") == "forfeit":
-            # strict mode: the game is lost rather than continued with a substitute move
+            # strict mode: the game is lost rather than continued with a substitute move. The concession is
+            # cached like an answer before it is sent: if the send fails and the decision is replayed after a
+            # reconnect, the concession is re-sent (the agent is never asked again) and the replay is no progress
+            concession = {"type": "concede", "reason": "agent_error"}
+            answered[decision.id] = concession
             this_connection.add(decision.id)
-            _send(conn, {"type": "concede", "reason": "agent_error"})
+            _send(conn, concession)
             return
         action, fallback = decision.default(), "agent_error"
     message = action.to_message(decision.id)

@@ -22,7 +22,8 @@ import java.util.stream.Stream;
  * <p>
  * Only games the rules engine finished are scored (wins, losses, draws); unfinished games (stopped, abandoned,
  * limits, errors) are counted but never change ratings. Ratings are recomputed in the order games ended, so
- * they are the same after a restart (rated games are reloaded from their records).
+ * they are the same after a restart: every rated result is appended to a ledger ({@code ratings.jsonl} in the
+ * data directory) whether or not the game is recorded, and reloaded from it (and from older game records).
  */
 final class Leaderboard {
 
@@ -44,6 +45,37 @@ final class Leaderboard {
 
     private final List<Entry> games = new ArrayList<>();
     private final Set<String> ids = new LinkedHashSet<>();
+    private Path ledger;
+    private int unpersisted;
+
+    /**
+     * Records a rated result durably (ledger line, flushed to disk) and adds it to the ratings.
+     *
+     * @return false if the ledger could not be written: the result counts until the next restart only
+     */
+    synchronized boolean addRated(String gameId, long endedAt, JsonObject result) {
+        boolean ok = false;
+        if (ledger != null) {
+            JsonObject line = new JsonObject();
+            line.addProperty("game_id", gameId);
+            line.addProperty("ended_at", endedAt);
+            line.add("result", result);
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(ledger,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND,
+                    java.nio.file.StandardOpenOption.WRITE)) {
+                ch.write(java.nio.ByteBuffer.wrap((Json.GSON.toJson(line) + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                ch.force(true);
+                ok = true;
+            } catch (IOException e) {
+                LOG.error("can't persist the rated result of game " + gameId + " to " + ledger + ": " + e.getMessage());
+            }
+        }
+        if (!ok) {
+            unpersisted++;
+        }
+        add(gameId, endedAt, result);
+        return ok;
+    }
 
     synchronized void add(String gameId, long endedAt, JsonObject result) {
         if (ids.add(gameId)) {
@@ -52,9 +84,35 @@ final class Leaderboard {
     }
 
     /**
-     * Reloads rated games from the records in {@code gamesDir} (config line first, result line last).
+     * Reloads rated results from the ledger in {@code dataDir}, then from game records that predate it.
      */
-    void load(Path gamesDir) {
+    void load(Path dataDir) {
+        synchronized (this) {
+            ledger = dataDir.resolve("ratings.jsonl");
+        }
+        int fromLedger = 0;
+        if (Files.isRegularFile(ledger)) {
+            try {
+                for (String line : Files.readAllLines(ledger, java.nio.charset.StandardCharsets.UTF_8)) {
+                    if (line.isBlank()) {
+                        continue;
+                    }
+                    try {
+                        JsonObject o = Json.parse(line);
+                        add(Json.getString(o, "game_id", ""), Json.getLong(o, "ended_at", 0), o.getAsJsonObject("result"));
+                        fromLedger++;
+                    } catch (RuntimeException e) {
+                        LOG.warn("skipping a damaged line of " + ledger);
+                    }
+                }
+            } catch (IOException e) {
+                LOG.error("can't read the ratings ledger " + ledger + ": " + e.getMessage());
+            }
+        }
+        if (fromLedger > 0) {
+            LOG.info("leaderboard: " + fromLedger + " rated results loaded from " + ledger.getFileName());
+        }
+        Path gamesDir = dataDir.resolve("games");
         if (!Files.isDirectory(gamesDir)) {
             return;
         }
@@ -84,7 +142,7 @@ final class Leaderboard {
             LOG.warn("can't read game records: " + e.getMessage());
         }
         if (n > 0) {
-            LOG.info("leaderboard: " + n + " rated games loaded");
+            LOG.info("leaderboard: " + n + " rated games loaded from game records");
         }
     }
 
@@ -165,6 +223,8 @@ final class Leaderboard {
         }
         JsonObject o = new JsonObject();
         o.addProperty("rated_games", ordered.size());
+        // results that could not be written to the ledger: they disappear on restart
+        o.addProperty("unpersisted", unpersisted);
         o.addProperty("k", K);
         o.addProperty("base", BASE);
         o.add("ratings", rows);

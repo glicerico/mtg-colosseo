@@ -354,8 +354,8 @@ def run_match(player_a: AgentSpec, player_b: AgentSpec, *, games: int = 10,
     Use an even number of games so that A and B start equally often. ``decks`` defaults to every deck on
     the server. Agent classes/factories get a fresh instance per game; agent instances are shared.
 
-    Gameplay itself is only best-effort reproducible: XMage shares one RNG between concurrent games and
-    its AI is time-bounded (see docs/agents.md).
+    A game's seed reproduces it with deterministic agents, also when games run in parallel (each game has its
+    own random generator); XMage's own AI is not reproducible, its search is time-bounded (see docs/agents.md).
 
     Match games are created with ``require_tokens=True`` (unless you pass ``require_tokens=False``): even on
     an open local server, an agent can then neither control nor watch the other seat with hands revealed.

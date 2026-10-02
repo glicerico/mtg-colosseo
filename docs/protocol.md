@@ -63,7 +63,7 @@ Options for `agent`/`human` seats:
 | `yield_after_cast` | `false` / `true` | pass automatically right after casting/activating (let it resolve) |
 | `auto_pay` | `true` / `true` | pay mana costs automatically; otherwise `pay_mana` decisions are raised |
 | `timeout_s` | `0` | apply the decision's default after this many seconds (0 = wait forever); counted as a `"timeout"` fallback |
-| `time_bank_s` | `0` | chess clock: total thinking time for the game; running out forfeits it (0 = no clock) |
+| `time_bank_s` | `0` | chess clock: total thinking time for the game, measured from the moment each decision is sent; running out forfeits it, including an answer that arrives after the time ran out (0 = no clock) |
 | `agent_id` | name | identity in records and ratings, e.g. `"my-agent@1.2"` (the SDK sends `name@version`) |
 | `agent_hash` | - | content hash of the agent's code, stored in the record (the SDK sends one) |
 
@@ -83,7 +83,7 @@ Game options:
 | `max_decisions` | `10000` | stop the game (`status: "limit"`, void) after this many decisions; 0 = no limit |
 | `max_record_mb` | `100` | stop the game (`status: "limit"`, void) when its record grows past this size; 0 = no limit |
 | `turn_limit_result` | `"draw"` | what reaching `max_turns` means: `"draw"` or `"void"` (`status: "turn_limit"`, not scored) |
-| `rated` | `false` | count the game on the server's leaderboard (requires token protection) |
+| `rated` | `false` | count the game on the server's leaderboard (requires token protection). The result is written to the ratings ledger (`data/ratings.jsonl`) whether or not the game is recorded; `result.rating_persisted` says whether that worked |
 
 Response (`201`) - the only place the game's secrets are returned:
 

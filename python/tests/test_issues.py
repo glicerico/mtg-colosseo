@@ -190,12 +190,46 @@ def test_rated_games_feed_the_leaderboard(client):
 
 
 def test_same_seed_replays_the_same_game(client):
-    """#12: shuffles and option order come from the seed, even with games running side by side."""
+    """#12: shuffles and option order come from the seed, even with games running side by side.
+    Compares the whole game - every decision (kind, prompt, options) and every action - not just the totals."""
+    import re
+
+    def norm(text):
+        return re.sub(r"\[[0-9a-f]{3}\]", "", text or "")  # XMage shows short object ids in names
+
     def game(seed):
-        r = run_game(RandomAgent(seed=1), HeuristicAgent(), *FDN, server=SERVER, seed=seed, starting_seat=0,
-                     max_turns=10, record=False)
-        return r["turns"], r["decisions"], tuple(p["life"] for p in r["players"]), r["winner_seat"]
+        box = {}
+        run_game(RandomAgent(seed=1), HeuristicAgent(), *FDN, server=SERVER, seed=seed, starting_seat=0,
+                 max_turns=10, record=True, on_created=box.update, client=client)
+        trace = []
+        for line in client.record(box["game_id"], token=box["owner_token"]):
+            data = line["data"]
+            if line["type"] == "decision":
+                trace.append(("D", data["seat"], data["kind"], norm(data["prompt"]),
+                              tuple(norm(o["label"]) for o in data["options"])))
+            elif line["type"] == "action":
+                trace.append(("A", data["seat"], norm(data["summary"])))
+            elif line["type"] == "result":
+                trace.append(("R", data["winner_seat"], data["turns"], tuple(p["life"] for p in data["players"])))
+        return trace
 
     with ThreadPoolExecutor(4) as pool:
         a1, b1, a2, b2 = pool.map(game, [21, 22, 21, 22])
-    assert a1 == a2 and b1 == b2
+    assert len(a1) > 20 and a1 == a2 and b1 == b2
+    assert a1 != b1
+
+
+def test_unrecorded_rated_games_are_persisted(client):
+    """Rated results are written to the ratings ledger even without a game record."""
+    tag = uuid.uuid4().hex[:6]
+
+    class A(HeuristicAgent):
+        name, version = f"ledger-{tag}", "1"
+
+    class B(HeuristicAgent):
+        name, version = f"ledger-{tag}", "2"
+
+    r = run_game(A(), B(), *FDN, server=SERVER, max_turns=2, record=False, rated=True)
+    assert r["rating_persisted"] is True
+    board = {row["agent_id"]: row for row in client.leaderboard()["ratings"]}
+    assert board[f"ledger-{tag}@1"]["games"] == 1

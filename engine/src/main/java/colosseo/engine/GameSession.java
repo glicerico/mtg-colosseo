@@ -270,11 +270,16 @@ public final class GameSession {
         msg.addProperty("type", "game_over");
         msg.addProperty("game_id", id);
         msg.add("result", r);
+        if (config.rated) {
+            // durable before anyone is told the result; a failure is visible in the result and the leaderboard
+            boolean persisted = manager.leaderboard().addRated(id, endedAt, r);
+            r.addProperty("rating_persisted", persisted);
+            if (!persisted) {
+                addLog("WARNING: this rated result could not be saved and will not survive a server restart");
+            }
+        }
         record("result", r);
         closeRecorder();
-        if (config.rated) {
-            manager.leaderboard().add(id, endedAt, r);
-        }
 
         // final views keep the usual hidden-information rules; they are cached for clients that attach later
         // (the XMage game itself is released below)
@@ -367,6 +372,28 @@ public final class GameSession {
         if (thread != null) {
             thread.interrupt();
         }
+    }
+
+    /**
+     * Makes a decision answerable. The clock starts before anyone can see (and answer) it.
+     */
+    void expose(Seat seat, Decision d) {
+        seat.askedAtNanos = System.nanoTime();
+        seat.pending.set(d);
+    }
+
+    /**
+     * Time bank expiry (timer thread): claims the pending decision atomically, so a decision that was answered
+     * in the meantime is never forfeited. Returns whether the seat forfeited.
+     */
+    boolean expireClock(Seat seat, Decision d) {
+        if (!seat.pending.compareAndSet(d, null)) {
+            return false;
+        }
+        seat.cancelTimeout();
+        seat.clockUsedS = seat.config().timeBankS;
+        forfeit(seat, "time", "ran out of thinking time (" + fmt(seat.config().timeBankS) + " s)");
+        return true;
     }
 
     /**
@@ -609,21 +636,16 @@ public final class GameSession {
         d.state = StateView.build(game, seat.playerId, false, seatIndex);
         d.newLog = seat.takeNewLog(log);
         lastSeatState.put(seat.index, d.state);
-        seat.pending.set(d);
+        expose(seat, d);
 
         JsonObject msg = d.toJson(id, seat.index);
         record("decision", msg);
         seat.broadcast(msg);
         seat.scheduleTimeout(d);
-        seat.askedAtMs = System.currentTimeMillis();
         double bank = seat.config().timeBankS;
         if (bank > 0) {
-            seat.scheduleClock(() -> {
-                if (seat.pending.get() == d) {
-                    seat.clockUsedS = bank;
-                    forfeit(seat, "time", "ran out of thinking time (" + fmt(bank) + " s)");
-                }
-            }, bank - seat.clockUsedS);
+            // may be installed after a fast answer: expiry then finds the decision already claimed and does nothing
+            seat.scheduleClock(() -> expireClock(seat, d), bank - seat.clockUsedS);
         }
 
         if (!spectators.isEmpty()) {
@@ -674,21 +696,20 @@ public final class GameSession {
         }
         seat.cancelTimeout();
         seat.cancelClock();
-        if (seat.config().timeBankS > 0) {
-            seat.clockUsedS += (System.currentTimeMillis() - seat.askedAtMs) / 1000.0;
+        double bank = seat.config().timeBankS;
+        if (bank > 0) {
+            seat.clockUsedS += Math.max(0, System.nanoTime() - seat.askedAtNanos) / 1e9;
+            if (seat.clockUsedS > bank) {
+                // the answer came after the time ran out (the timer just hadn't fired yet): the clock wins
+                seat.clockUsedS = bank;
+                forfeit(seat, "time", "ran out of thinking time (" + fmt(bank) + " s)");
+                return null;
+            }
         }
         String fallback = Json.getString(action, "fallback", null);
         if (fallback != null) {
             seat.countFallback(fallback);
         }
-        responder.execute(() -> {
-            try {
-                d.responder.apply(action);
-            } catch (RuntimeException e) {
-                LOG.error("applying action failed", e);
-            }
-        });
-
         // The acting seat (and spectators allowed to see hands) get the full acknowledgment; the opponent and
         // ordinary spectators get a redacted one that never names hidden cards. Comments are the agent's
         // private rationale unless the game makes them public.
@@ -706,6 +727,14 @@ public final class GameSession {
             }
         }
         broadcastSpectators(full, pub);
+        // only now wake the game thread: the record and every client see this action before the next decision
+        responder.execute(() -> {
+            try {
+                d.responder.apply(action);
+            } catch (RuntimeException e) {
+                LOG.error("applying action failed", e);
+            }
+        });
         return null;
     }
 
