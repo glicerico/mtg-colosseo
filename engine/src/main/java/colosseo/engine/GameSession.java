@@ -393,6 +393,7 @@ public final class GameSession {
         seat.cancelTimeout();
         seat.clockUsedS = seat.config().timeBankS;
         forfeit(seat, "time", "ran out of thinking time (" + fmt(seat.config().timeBankS) + " s)");
+        answerForForfeitedSeat(seat, d); // the claimed dialog must not keep the game thread waiting
         return true;
     }
 
@@ -461,6 +462,31 @@ public final class GameSession {
         }
         addLog(seat.config().name + " " + message);
         game.setConcedingPlayer(seat.playerId);
+        // XMage only interrupts the dialog of the player holding priority; if this seat is answering anything
+        // else (mulligan, blocks, a target), its dialog would wait forever. Answer it with its default - the
+        // seat has lost - so the game reaches XMage's concession check.
+        Decision d = seat.pending.getAndSet(null);
+        if (d != null) {
+            seat.cancelTimeout();
+            seat.cancelClock();
+            answerForForfeitedSeat(seat, d);
+        }
+    }
+
+    /**
+     * Applies a decision's default for a seat that already forfeited (no client is asked any more).
+     */
+    private void answerForForfeitedSeat(Seat seat, Decision d) {
+        JsonObject a = d.defaultAction != null ? d.defaultAction.deepCopy()
+                : Decision.choiceAction(d.options.isEmpty() ? "" : d.options.keySet().iterator().next());
+        a.addProperty("decision_id", d.id);
+        responder.execute(() -> {
+            try {
+                d.responder.apply(a);
+            } catch (RuntimeException e) {
+                LOG.debug("default for forfeited seat failed", e);
+            }
+        });
     }
 
     /**
@@ -615,6 +641,11 @@ public final class GameSession {
             responder.execute(() -> d.responder.apply(queued));
             return;
         }
+        if (forfeitSeat != null && forfeitSeat == seat.index) {
+            // this seat has lost; until XMage processes the concession, its dialogs get their defaults
+            answerForForfeitedSeat(seat, d);
+            return;
+        }
         // loop guard: an agent that keeps answering a payment prompt without progress gets cancelled
         String repeatKey = d.kind + "|" + d.prompt + "|" + d.options.keySet();
         if (Decision.MANA.equals(d.kind) && repeatKey.equals(seat.lastDecisionKey) && ++seat.repeatCount >= 25) {
@@ -700,10 +731,10 @@ public final class GameSession {
         if (bank > 0) {
             seat.clockUsedS += Math.max(0, System.nanoTime() - seat.askedAtNanos) / 1e9;
             if (seat.clockUsedS > bank) {
-                // the answer came after the time ran out (the timer just hadn't fired yet): the clock wins
+                // the answer came after the time ran out (the timer just hadn't fired yet): the clock wins; the
+                // answer is still applied so the game thread moves on to the concession
                 seat.clockUsedS = bank;
                 forfeit(seat, "time", "ran out of thinking time (" + fmt(bank) + " s)");
-                return null;
             }
         }
         String fallback = Json.getString(action, "fallback", null);

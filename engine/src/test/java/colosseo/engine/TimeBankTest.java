@@ -122,14 +122,54 @@ public class TimeBankTest {
     }
 
     @Test
-    public void answerAfterTheBankRanOutForfeitsInsteadOfCounting() throws Exception {
+    public void answerAfterTheBankRanOutStillUnblocksTheGame() throws Exception {
         GameSession s = session(0.05);
         Seat seat = s.seat(0);
+        CountDownLatch applied = new CountDownLatch(1);
         Decision d = decision(s, seat);
+        d.responder = new Decision.Responder() {
+            @Override
+            public String validate(JsonObject action) {
+                return null;
+            }
+
+            @Override
+            public void apply(JsonObject action) {
+                applied.countDown();
+            }
+        };
         s.expose(seat, d);
         Thread.sleep(120); // the timer would have fired; the answer races it and loses on the clock
         assertNull(s.submit(seat, answer(d), null));
         assertEquals(0.05, seat.clockUsedS, 1e-9);
         assertNull(seat.pending.get());
+        // the waiting game thread is released (the forfeit itself is processed by XMage)
+        assertTrue(applied.await(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    public void expiryAnswersTheClaimedDialogWithItsDefault() throws Exception {
+        GameSession s = session(5);
+        Seat seat = s.seat(0);
+        AtomicReference<JsonObject> applied = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+        Decision d = decision(s, seat);
+        d.defaultAction = Decision.choiceAction("yes");
+        d.responder = new Decision.Responder() {
+            @Override
+            public String validate(JsonObject action) {
+                return null;
+            }
+
+            @Override
+            public void apply(JsonObject action) {
+                applied.set(action);
+                done.countDown();
+            }
+        };
+        s.expose(seat, d);
+        assertTrue(s.expireClock(seat, d));
+        assertTrue(done.await(5, TimeUnit.SECONDS));
+        assertEquals("yes", applied.get().get("choice").getAsString());
     }
 }

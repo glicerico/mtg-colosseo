@@ -110,19 +110,22 @@ def test_turn_limit_can_be_void(client):
     assert r["status"] == "turn_limit" and outcome(r) == "unfinished"
 
 
-def test_time_bank_forfeits(client):
-    """#7: a seat that runs out of its time bank loses the game."""
+@pytest.mark.parametrize("seed", [9, 11, 21])
+def test_time_bank_forfeits(client, seed):
+    """#7: a seat that runs out of its time bank loses the game. Seeds 9 and 11 hit the clock while the seat is in
+    a dialog XMage doesn't interrupt on concession (they used to hang the game)."""
     class Slow(HeuristicAgent):
+        seat_options = {"time_bank_s": 1.0}
+
         def decide(self, d):
             time.sleep(0.7)
             return super().decide(d)
 
-    slow = HeuristicAgent()
-    slow.seat_options = {"time_bank_s": 1.0}
-    slow.decide = Slow().decide
-    r = run_game(slow, HeuristicAgent(), *FDN, server=SERVER, starting_seat=0, max_turns=20, record=False)
-    assert r["status"] == "finished" and r["winner_seat"] == 1
-    assert r["reason"] == "forfeit" and r["forfeit_seat"] == 0 and r["forfeit_reason"] == "time"
+    r = run_game(Slow(), HeuristicAgent(), *FDN, server=SERVER, starting_seat=0, max_turns=20, record=False,
+                 seed=seed, deadline_s=60)
+    assert r["status"] == "finished", r
+    assert r["winner_seat"] == 1 and r["reason"] == "forfeit"
+    assert r["forfeit_seat"] == 0 and r["forfeit_reason"] == "time"
     assert r["players"][0]["clock_used_s"] >= 1.0
 
 
@@ -233,3 +236,35 @@ def test_unrecorded_rated_games_are_persisted(client):
     assert r["rating_persisted"] is True
     board = {row["agent_id"]: row for row in client.leaderboard()["ratings"]}
     assert board[f"ledger-{tag}@1"]["games"] == 1
+
+
+class CrashOnBlocks(HeuristicAgent):
+    name = "crash-on-blocks"
+
+    def decide(self, d):
+        if d.kind == "declare_blockers":
+            raise RuntimeError("policy bug while blocking")
+        return super().decide(d)
+
+
+class SlowOnBlocks(HeuristicAgent):
+    name = "slow-on-blocks"
+    seat_options = {"time_bank_s": 1.0}
+
+    def decide(self, d):
+        if d.kind == "declare_blockers":
+            time.sleep(1.5)
+        return super().decide(d)
+
+
+@pytest.mark.parametrize("defender,on_error,reason", [(CrashOnBlocks, "forfeit", "agent_error"),
+                                                       (SlowOnBlocks, "default", "time")])
+def test_forfeit_outside_priority_ends_the_game(client, defender, on_error, reason):
+    """A seat that forfeits while answering a non-priority dialog (blocks during the opponent's attack) must not
+    leave the game waiting for that dialog."""
+    t0 = time.monotonic()
+    r = run_game(AllOutAttacker(), defender(), MENACE_DECK, MENACE_DECK, server=SERVER, starting_seat=0,
+                 max_turns=12, record=False, seed=3, deadline_s=90, on_error=on_error, reconnect_timeout=10)
+    assert time.monotonic() - t0 < 60
+    assert r["status"] == "finished", r
+    assert r["forfeit_seat"] == 1 and r["forfeit_reason"] == reason and r["winner_seat"] == 0
