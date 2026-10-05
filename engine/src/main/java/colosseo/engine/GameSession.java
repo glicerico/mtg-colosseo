@@ -308,12 +308,24 @@ public final class GameSession {
         manager.onFinished(this);
     }
 
+    /**
+     * Whether a view carries the UI-only {@code explain} data: spectators (null) and seats of type {@code human}
+     * (the browser). Agents' observations never do.
+     */
+    private boolean explains(UUID viewer) {
+        if (viewer == null) {
+            return true;
+        }
+        Seat seat = seatByPlayer.get(viewer);
+        return seat != null && "human".equals(seat.config().type);
+    }
+
     private JsonObject safeState(UUID viewer, boolean revealAll) {
         if (game == null) {
             return null;
         }
         try {
-            return StateView.build(game, viewer, revealAll, seatIndex);
+            return StateView.build(game, viewer, revealAll, seatIndex, explains(viewer));
         } catch (RuntimeException e) {
             LOG.debug("final state failed", e);
             return null;
@@ -540,7 +552,7 @@ public final class GameSession {
         for (Seat seat : seats) {
             if (seat.hasConnections()) {
                 watched = true;
-                JsonObject state = StateView.build(game, seat.playerId, false, seatIndex);
+                JsonObject state = StateView.build(game, seat.playerId, false, seatIndex, explains(seat.playerId));
                 lastSeatState.put(seat.index, state);
                 JsonObject msg = new JsonObject();
                 msg.addProperty("type", "state");
@@ -572,10 +584,10 @@ public final class GameSession {
             }
         }
         if (needNormal) {
-            lastSpectatorState = StateView.build(game, null, false, seatIndex);
+            lastSpectatorState = StateView.build(game, null, false, seatIndex, true);
         }
         if (needRevealed) {
-            lastSpectatorStateRevealed = StateView.build(game, null, true, seatIndex);
+            lastSpectatorStateRevealed = StateView.build(game, null, true, seatIndex, true);
         }
         for (Connection c : spectators) {
             JsonObject msg = new JsonObject();
@@ -664,7 +676,7 @@ public final class GameSession {
             stop("limit", "decision limit (" + config.maxDecisions + ") reached");
             return;
         }
-        d.state = StateView.build(game, seat.playerId, false, seatIndex);
+        d.state = StateView.build(game, seat.playerId, false, seatIndex, explains(seat.playerId));
         d.newLog = seat.takeNewLog(log);
         lastSeatState.put(seat.index, d.state);
         expose(seat, d);
@@ -943,7 +955,7 @@ public final class GameSession {
             return null;
         }
         try {
-            return StateView.build(game, viewer, revealAll, seatIndex);
+            return StateView.build(game, viewer, revealAll, seatIndex, explains(viewer));
         } catch (RuntimeException e) {
             return null;
         }

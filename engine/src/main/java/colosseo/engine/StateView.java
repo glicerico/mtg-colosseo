@@ -53,6 +53,15 @@ public final class StateView {
      * @param revealAll show every hand (spectator omniscient mode)
      */
     public static JsonObject build(Game game, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf) {
+        return build(game, viewerId, revealAll, seatOf, false);
+    }
+
+    /**
+     * @param explain add each permanent's {@code explain} (see {@link Explain}): for browser views only, never for
+     *                agents' observations
+     */
+    public static JsonObject build(Game game, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf, boolean explain) {
+        Explain explainer = explain ? new Explain(game, viewerId, revealAll) : null;
         JsonObject o = new JsonObject();
         o.addProperty("turn", game.getTurnNum());
         o.addProperty("phase", game.getTurnPhaseType() == null ? null : game.getTurnPhaseType().name());
@@ -63,7 +72,7 @@ public final class StateView {
 
         JsonArray players = new JsonArray();
         for (Player player : game.getState().getPlayers().values()) {
-            players.add(player(game, player, viewerId, revealAll, seatOf));
+            players.add(player(game, player, viewerId, revealAll, seatOf, explainer));
         }
         o.add("players", players);
 
@@ -118,7 +127,8 @@ public final class StateView {
         return o;
     }
 
-    private static JsonObject player(Game game, Player player, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf) {
+    private static JsonObject player(Game game, Player player, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf,
+                                     Explain explainer) {
         JsonObject p = new JsonObject();
         p.addProperty("id", Json.str(player.getId()));
         p.addProperty("name", player.getName());
@@ -160,7 +170,14 @@ public final class StateView {
         JsonArray battlefield = new JsonArray();
         for (Permanent perm : game.getBattlefield().getAllPermanents()) {
             if (perm.isControlledBy(player.getId()) && perm.isPhasedIn()) {
-                battlefield.add(permanent(game, perm, viewerId, revealAll));
+                JsonObject c = permanent(game, perm, viewerId, revealAll);
+                if (explainer != null && !c.has("hidden")) {
+                    JsonObject x = explainer.of(perm);
+                    if (x != null) {
+                        c.add("explain", x);
+                    }
+                }
+                battlefield.add(c);
             }
         }
         p.add("battlefield", battlefield);
