@@ -19,11 +19,41 @@ const KIND_TITLES = {
 const isLand = (c) => (c.types || []).includes('Land') && !(c.types || []).includes('Creature');
 const isCreature = (c) => (c.types || []).includes('Creature');
 
-// Card width limits (px) and how many card widths the board needs vertically: the opponent's land/other row
-// (lands are .72 wide) and creature row, ours, and our hand (.95 wide), each card 1.395 times as tall as wide.
+// Card width limits (px); the size of lands and other permanents, and of the cards in hand, relative to creatures:
+// full size, and the smallest they shrink to before the creatures do.
 const CARD_MIN = 48;
-const CARD_MAX = 330;
-const BOARD_CARD_HEIGHTS = (0.72 + 1.1 + 1.1 + 0.72 + 0.95) * 1.395;
+const CARD_MAX = 480;
+const LAND_K = { max: 0.72, min: 0.4 };
+const HAND_K = { max: 0.95, min: 0.45 };
+const ROW_GAP = 6; // between the rows of a side (.side, .field gap)
+const BESIDE_GAP = 14; // between the creature row and the land/other row beside it
+const SIDE_PAD = 12; // a side's vertical padding
+const FIT_SLACK = 16; // room for attacking creatures, which are drawn moved toward the middle
+const HAND_PAD = 18; // above the hand, where a hovered card rises
+
+/**
+ * Whether the rows fit the board at card width w, land/other scale k and hand scale hk, with each side's
+ * land/other row beside its creatures (cfg.top, cfg.bottom) or behind them. Creature rows must fit the width
+ * (so the size control can't push creatures out of view); strict: land/other rows too, without shrinking.
+ */
+function fits(m, w, k, hk, cfg, strict) {
+  let height = m.Itop + Math.max(m.Ibot, HAND_PAD + 1.395 * hk * w) + 2 * ROW_GAP;
+  for (const s of ['top', 'bottom']) {
+    const z = m[s];
+    const ch = Math.max(1.395 * w + 8, z.ch.a * w + z.ch.b);
+    const cw = z.cw.a * w + z.cw.b;
+    const pw = z.has ? z.pw.a * k * w + z.pw.b : 0;
+    const ph = z.has ? Math.max(1.395 * k * w + 4, z.ph.a * k * w + z.ph.b) : 0;
+    if (cfg[s]) {
+      if (cw + BESIDE_GAP + pw > m.W) return false;
+      height += Math.max(ch, ph);
+    } else {
+      if (cw > m.W || (strict && pw > m.W)) return false;
+      height += ch + (z.has ? ROW_GAP + ph : 0);
+    }
+  }
+  return height <= m.avail;
+}
 
 export class GameView {
   constructor(root, gameId, seat) {
@@ -48,10 +78,10 @@ export class GameView {
     this.groups = new Map(); // wrappers for token stacks and attachment groups, by key
     this.keyHandler = (e) => this.onKey(e);
     document.addEventListener('keydown', this.keyHandler);
-    this.resizeHandler = () => this.fit();
+    this.resizeHandler = () => this.layout();
     window.addEventListener('resize', this.resizeHandler);
     this.build();
-    this.fit();
+    this.layout();
     this.connect();
   }
 
@@ -59,7 +89,7 @@ export class GameView {
     this.destroyed = true;
     document.removeEventListener('keydown', this.keyHandler);
     window.removeEventListener('resize', this.resizeHandler);
-    for (const v of ['--card-w', '--ui']) document.documentElement.style.removeProperty(v);
+    for (const v of ['--card-w', '--ui', '--land-k', '--hand-k']) document.documentElement.style.removeProperty(v);
     clearInterval(this.pollTimer);
     if (this.ws) this.ws.close();
     document.getElementById('conn-status').textContent = '';
@@ -93,15 +123,14 @@ export class GameView {
       banner: h('div', { class: 'banner hidden' }),
     };
     const e = this.el;
-    const permRow = (lands, others) => h('div', { class: 'perm-row' }, lands, others);
-    const board = h('div', { class: 'board' },
-      e.banner,
-      h('div', { class: 'side top' }, h('div', { class: 'info-hand' }, e.topInfo, e.topHand),
-        permRow(e.topLands, e.topOthers), e.topCreatures),
-      h('div', { class: 'middle' }, e.phase, h('div', { class: 'middle-row' }, e.center, e.stack)),
-      h('div', { class: 'side bottom' }, e.botCreatures, permRow(e.botLands, e.botOthers),
-        h('div', { class: 'info-hand' }, e.botInfo, e.botHand)),
-      e.prompt);
+    e.topPerm = h('div', { class: 'perm-row' }, e.topLands, e.topOthers);
+    e.botPerm = h('div', { class: 'perm-row' }, e.botLands, e.botOthers);
+    e.topInfoHand = h('div', { class: 'info-hand' }, e.topInfo, e.topHand);
+    e.botInfoHand = h('div', { class: 'info-hand' }, e.botInfo, e.botHand);
+    e.topSide = h('div', { class: 'side top' }, e.topInfoHand, h('div', { class: 'field' }, e.topPerm, e.topCreatures));
+    e.botSide = h('div', { class: 'side bottom' }, h('div', { class: 'field' }, e.botCreatures, e.botPerm), e.botInfoHand);
+    e.middle = h('div', { class: 'middle' }, e.phase, h('div', { class: 'middle-row' }, e.center, e.stack));
+    const board = h('div', { class: 'board' }, e.banner, e.topSide, e.middle, e.botSide, e.prompt);
     board.addEventListener('click', (ev) => this.onBoardClick(ev));
     this.board = board;
     this.root.append(board, h('aside', { class: 'sidebar' }, e.header, e.log));
@@ -308,13 +337,13 @@ export class GameView {
       value: settings.cardScale, 'aria-label': 'Card size',
     });
     const pct = h('span', { class: 'card-size-value' }, `${Math.round(settings.cardScale * 100)}%`);
+    this.el.sizeValue = pct;
     size.addEventListener('input', () => {
       setCardScale(parseFloat(size.value));
-      pct.textContent = `${Math.round(settings.cardScale * 100)}%`;
-      this.fit();
+      this.layout();
     });
     size.addEventListener('dblclick', () => { size.value = 1; size.dispatchEvent(new Event('input')); });
-    controls.push(h('label', { class: 'toggle size-control', title: 'Card size (100% fits the window; double-click to reset)' },
+    controls.push(h('label', { class: 'toggle size-control', title: 'Card size (100% fits the board to the window; double-click to reset)' },
       'Cards ', size, pct));
     e.header.replaceChildren(
       h('div', { class: 'side-title' }, h('a', { href: '#/' }, '←'), ' ', title),
@@ -420,7 +449,7 @@ export class GameView {
     this.renderPhase();
     this.renderStack();
     this.renderPrompt();
-    this.squeeze();
+    this.layout();
     const pin = pinnedCard();
     if (pin) {
       // keep a pinned explanation current (stats change while it is open)
@@ -607,6 +636,7 @@ export class GameView {
     this.renderItems(lands2, this.items(lands, attachmentsOf, p, false));
     this.renderItems(others2, this.items(others, attachmentsOf, p));
     others2.classList.toggle('empty', !others.length);
+    (where === 'top' ? e.topPerm : e.botPerm).classList.toggle('empty', !lands.length && !others.length);
   }
 
   /** Display items for a row: a card, a card with its attachments, or a stack of identical tokens. */
@@ -676,23 +706,128 @@ export class GameView {
   // --- sizing ----------------------------------------------------------------------------------------
 
   /**
-   * Sizes cards to the window: the largest width at which both players' rows and the hand fit the board's
-   * height (and a row of creatures its width), times the player's card-size setting, within CARD_MIN..CARD_MAX.
-   * --ui scales the rest of the interface (text, buttons, player panels) on large screens.
+   * Sizes the board to the window and to what is on it. Each player's battlefield is a creature row and, when
+   * there are any, a row of lands and other permanents; that second row goes beside the creatures when the
+   * width allows ("beside"), else behind them. The card width is the largest at which every row fits the board
+   * (vertically, and horizontally for rows beside each other), within CARD_MIN..CARD_MAX: this is 100 % on the
+   * player's size control. Other values scale it; when a larger size would not fit, the lands, other permanents
+   * and the hand shrink first (to LAND_K.min, HAND_K.min), and past that the size is capped so that both
+   * creature rows always stay in view, at their full width. --ui scales the rest of the interface (text, buttons, panels).
    */
-  fit() {
+  layout() {
     if (!this.board) return;
     const root = document.documentElement.style;
     const ui = Math.min(2.2, Math.max(0.85, Math.min(window.innerWidth / 1920, window.innerHeight / 1080)));
     root.setProperty('--ui', ui.toFixed(3));
-    const H = this.board.clientHeight;
-    const W = this.board.clientWidth;
-    if (!H || !W) return;
-    const fixed = 250 * ui; // prompt bar, phase bar, opponent's info row, gaps and paddings
-    const auto = Math.min((H - fixed) / BOARD_CARD_HEIGHTS, (W - 24) / 10.5);
-    const w = Math.round(Math.min(CARD_MAX, Math.max(CARD_MIN, auto * settings.cardScale)));
-    root.setProperty('--card-w', `${w}px`);
+    const m = this.measure();
+    if (!m) return;
+    const configs = [];
+    for (const top of m.top.has ? [false, true] : [false]) {
+      for (const bottom of m.bottom.has ? [false, true] : [false]) configs.push({ top, bottom });
+    }
+    const kAt = (t) => [LAND_K.min + t * (LAND_K.max - LAND_K.min), HAND_K.min + t * (HAND_K.max - HAND_K.min)];
+    // largest width (0: none) / largest share t of the lands' and hand's full size (-1: none) that fits
+    const maxW = (cfg, t, strict) => {
+      const [k, hk] = kAt(t);
+      if (!fits(m, CARD_MIN, k, hk, cfg, strict)) return 0;
+      let lo = CARD_MIN, hi = CARD_MAX;
+      if (fits(m, hi, k, hk, cfg, strict)) return hi;
+      while (hi - lo > 0.5) { const mid = (lo + hi) / 2; if (fits(m, mid, k, hk, cfg, strict)) lo = mid; else hi = mid; }
+      return lo;
+    };
+    const maxT = (cfg, w) => {
+      if (!fits(m, w, ...kAt(0), cfg, false)) return -1;
+      if (fits(m, w, ...kAt(1), cfg, false)) return 1;
+      let lo = 0, hi = 1;
+      while (hi - lo > 0.01) { const mid = (lo + hi) / 2; if (fits(m, w, ...kAt(mid), cfg, false)) lo = mid; else hi = mid; }
+      return lo;
+    };
+    // 100 %: the configuration with the largest cards at full-size lands and hand, rows not squeezed
+    let auto = 0;
+    let autoCfg = configs[0];
+    for (const strict of [true, false]) {
+      for (const cfg of configs) { const w = maxW(cfg, 1, strict); if (w > auto) { auto = w; autoCfg = cfg; } }
+      if (auto) break;
+    }
+    auto = auto || CARD_MIN;
+    const target = Math.min(CARD_MAX, Math.max(CARD_MIN, auto * settings.cardScale));
+    const beside = (cfg) => +cfg.top + +cfg.bottom;
+    let best = null;
+    for (const cfg of configs) {
+      const t = maxT(cfg, target);
+      if (t < 0) continue;
+      if (!best || t > best.t + 0.005 || (Math.abs(t - best.t) <= 0.005
+        && (cfg === autoCfg || (best.cfg !== autoCfg && beside(cfg) > beside(best.cfg))))) best = { cfg, t, w: target };
+    }
+    if (!best) {
+      // too large for this window even with small lands and hand: the largest size that keeps the creatures in view
+      best = { cfg: configs[0], t: 0, w: 0 };
+      for (const cfg of configs) { const w = maxW(cfg, 0, false); if (w > best.w) best = { cfg, t: 0, w }; }
+      if (best.w) best.t = Math.max(0, maxT(best.cfg, best.w));
+      else best.w = CARD_MIN; // a tiny window: the sides scroll
+    }
+    let [k, hk] = kAt(best.t);
+    // the shared shrink may be more than one of them needs (the lands' width, say, not the board's height):
+    // grow the hand, then the lands, back as far as they fit
+    const grow = (lo, hi, ok) => { if (ok(hi)) return hi; for (let i = 0; i < 12; i++) { const mid = (lo + hi) / 2; if (ok(mid)) lo = mid; else hi = mid; } return lo; };
+    hk = grow(hk, HAND_K.max, (x) => fits(m, best.w, k, x, best.cfg, false));
+    k = grow(k, LAND_K.max, (x) => fits(m, best.w, x, hk, best.cfg, false));
+    root.setProperty('--card-w', `${Math.floor(best.w)}px`);
+    root.setProperty('--land-k', (Math.floor(k * 1000) / 1000).toFixed(3));
+    root.setProperty('--hand-k', (Math.floor(hk * 1000) / 1000).toFixed(3));
+    this.el.topSide.classList.toggle('beside', best.cfg.top);
+    this.el.botSide.classList.toggle('beside', best.cfg.bottom);
+    const pct = this.el.sizeValue;
+    if (pct) {
+      const capped = best.w < target - 1;
+      pct.textContent = capped ? `${Math.round((best.w / auto) * 100)}% max` : `${Math.round(settings.cardScale * 100)}%`;
+      pct.classList.toggle('capped', capped);
+      pct.title = capped ? 'The largest size at which both creature rows fit this window' : '';
+    }
+    this.board.dataset.layout = JSON.stringify({ w: Math.floor(best.w), auto: Math.round(auto), land_k: +k.toFixed(3),
+      hand_k: +hk.toFixed(3), beside: best.cfg });
     this.squeeze();
+  }
+
+  /**
+   * Measures what the sizing needs: the board's free height and width, and each player's creature row and
+   * land/other row. Rows are laid out once at two card widths with nothing shrunk; their sizes are linear in the
+   * card width (cards scale, gaps don't), so two measurements give them at any width.
+   */
+  measure() {
+    const b = this.board;
+    const e = this.el;
+    const H = b.clientHeight;
+    if (!H || !b.clientWidth) return null;
+    const box = (el) => el.getBoundingClientRect();
+    for (const z of b.querySelectorAll('.zone, .hand-row')) z.style.removeProperty('--fit');
+    b.classList.add('measuring');
+    const rows = { top: [e.topCreatures, e.topPerm], bottom: [e.botCreatures, e.botPerm] };
+    const read = (px) => {
+      b.style.setProperty('--card-w', `${px}px`);
+      const out = {};
+      for (const [s, [c, p]] of Object.entries(rows)) { const rc = box(c), rp = box(p); out[s] = [rc.width, rc.height, rp.width, rp.height]; }
+      return out;
+    };
+    const r1 = read(100);
+    const r2 = read(200);
+    b.style.removeProperty('--card-w');
+    box(b); // settle the current size before transitions are back on, so nothing animates from the measured one
+    b.classList.remove('measuring');
+    const lin = (v1, v2) => ({ a: (v2 - v1) / 100, b: 2 * v1 - v2 }); // v(w) = a w + b
+    const m = {
+      avail: H - box(e.middle).height - box(e.prompt).height - (e.banner.classList.contains('hidden') ? 0 : box(e.banner).height + 8)
+        - 2 * SIDE_PAD - FIT_SLACK,
+      W: b.clientWidth - 24 - 4, // less a little for rounding
+      Itop: box(e.topInfoHand).height,
+      Ibot: box(e.botInfo).height,
+    };
+    for (const s of ['top', 'bottom']) {
+      const [a, z] = [r1[s], r2[s]];
+      m[s] = { has: !(s === 'top' ? e.topPerm : e.botPerm).classList.contains('empty'),
+        cw: lin(a[0], z[0]), ch: lin(a[1], z[1]), pw: lin(a[2], z[2]), ph: lin(a[3], z[3]) };
+    }
+    return m;
   }
 
   /** Shrinks the cards of any row that would not fit its width, instead of wrapping it onto a second line. */

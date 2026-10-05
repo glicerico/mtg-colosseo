@@ -183,28 +183,74 @@ def test_click_pins_the_explanation(browser):
 
 def set_slider(page, value):
     page.eval_on_selector("input.card-size", "(el, v) => { el.value = v; el.dispatchEvent(new Event('input')); }", str(value))
+    page.wait_for_timeout(300)  # cards move with a short transition
 
 
 def card_width(page):
-    return page.evaluate("() => document.querySelector('.side.bottom .zone.creatures .card').offsetWidth")
+    """The card width the board is laid out with (a creature's, unless its row had to shrink)."""
+    return layout(page)["w"]
 
 
-@pytest.mark.parametrize("size", [(1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)])
+SIZES = [(1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)]
+
+IN_VIEW = """() => [...document.querySelectorAll('.zone.creatures .card')].map(c => {
+    const b = c.getBoundingClientRect(), s = c.closest('.side').getBoundingClientRect();
+    return b.top >= s.top - 1 && b.bottom <= s.bottom + 1 && b.left >= s.left - 1 && b.right <= s.right + 1
+        && b.top >= 0 && b.bottom <= innerHeight; })"""
+
+NO_SCROLL = ("() => [...document.querySelectorAll('.side')].every(s => s.scrollHeight <= s.clientHeight + 1)"
+             " && document.documentElement.scrollHeight <= innerHeight + 1")
+
+
+def crowd(st):
+    """Fills the opponent's side: 14 more creatures, 6 more lands and 4 more Treasures (copies of its own)."""
+    opp = next(p for p in st["players"] if p["seat"] == 1)
+    for name, n in (("Bear Cub", 14), ("Forest", 6), ("Treasure Token", 4)):
+        src = next(c for c in opp["battlefield"] if c["name"] == name)
+        for i in range(n):
+            opp["battlefield"].append({**src, "id": f"00000000-0000-4000-8000-{len(opp['battlefield']):012d}",
+                                       "name": f"{name} {i}" if name == "Bear Cub" else name})
+
+
+def layout(page):
+    return json.loads(page.get_attribute(".board", "data-layout"))
+
+
+@pytest.mark.parametrize("size", SIZES)
 def test_cards_scale_with_the_window_without_scrolling(browser, size):
     page = open_board(browser, 68, size=size)
     w = card_width(page)
-    assert 48 <= w <= 330
-    # the board fits: neither side scrolls, and the page does not
-    assert page.evaluate("() => [...document.querySelectorAll('.side')].every(s => s.scrollHeight <= s.clientHeight + 1)")
-    assert page.evaluate("() => document.documentElement.scrollHeight <= innerHeight + 1")
+    assert 48 <= w <= 480
+    # the board fits: neither side scrolls, and the page does not; every creature is in view
+    assert page.evaluate(NO_SCROLL)
+    assert all(page.evaluate(IN_VIEW))
     assert page.errors == []
 
 
 def test_cards_grow_on_larger_windows(browser):
-    widths = {s: card_width(open_board(browser, 68, size=s)) for s in [(1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)]}
+    widths = {s: card_width(open_board(browser, 68, size=s)) for s in SIZES}
     w = [widths[s] for s in sorted(widths)]
     assert w == sorted(w) and w[-1] >= 2.5 * w[0], widths
     assert widths[(2560, 1440)] >= 1.25 * widths[(1920, 1080)], widths
+
+
+@pytest.mark.parametrize("size", [(2560, 1440), (3840, 2160)])
+def test_large_screens_are_used(browser, size):
+    # a typical board (the operator's game never had more than 10 permanents a side): its rows are sized from
+    # what is on them, and lands go beside the creatures, so the cards take the width of the board
+    page = open_board(browser, 68, size=size)
+    assert layout(page)["beside"] == {"top": True, "bottom": True}
+    assert card_width(page) >= 0.085 * size[0]  # 218 px at 2560, 326 at 3840 (164 and 246 before)
+    used = page.evaluate("""() => { const b = document.querySelector('.board').getBoundingClientRect();
+        const r = Math.max(...[...document.querySelectorAll('.side.top .card')].map(c => c.getBoundingClientRect().right));
+        return (r - b.left) / b.width; }""")
+    assert used >= 0.9
+
+
+def test_full_boards_put_lands_behind_the_creatures(browser):
+    page = open_board(browser, 68, size=(1920, 1080), mutate=crowd)
+    assert layout(page)["beside"]["top"] is False
+    assert page.evaluate(NO_SCROLL) and all(page.evaluate(IN_VIEW))
 
 
 def test_card_size_control(browser):
@@ -212,15 +258,36 @@ def test_card_size_control(browser):
     base = card_width(page)
     slider = page.locator("input.card-size")
     assert slider.input_value() == "1"
-    set_slider(page, 1.4)
-    assert card_width(page) == pytest.approx(base * 1.4, abs=3)
-    assert page.locator(".card-size-value").inner_text() == "140%"
-    assert page.evaluate("() => localStorage.getItem('colosseo.cardScale')") == "1.4"
+    set_slider(page, 1.2)
+    assert card_width(page) == pytest.approx(base * 1.2, abs=3)
+    assert page.locator(".card-size-value").inner_text() == "120%"
+    assert page.evaluate("() => localStorage.getItem('colosseo.cardScale')") == "1.2"
     set_slider(page, 0.6)
     assert card_width(page) == pytest.approx(base * 0.6, abs=3)
     # the setting survives a reload
     page2 = open_board(browser, 68, card_scale=0.6)
     assert card_width(page2) == pytest.approx(base * 0.6, abs=3)
+
+
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("decision,mutate", [(8, None), (59, None), (68, None), (68, crowd)], ids=["d8", "d59", "d68", "d68-crowded"])
+def test_creature_rows_stay_in_view_at_every_card_size(browser, size, decision, mutate):
+    page = open_board(browser, decision, size=size, mutate=mutate)
+    base = card_width(page)
+    for value in (0.6, 1, 1.3, 1.6):
+        set_slider(page, value)
+        assert page.evaluate(NO_SCROLL), value
+        assert all(page.evaluate(IN_VIEW)), value
+        hand = page.evaluate("() => [...document.querySelectorAll('.hand-row.bottom .card')].every(c => c.getBoundingClientRect().bottom <= innerHeight)")
+        assert hand, value
+    # the largest size is larger than the window's own unless the creatures already fill the width, and says
+    # when it is limited by the window
+    assert card_width(page) >= base if mutate else card_width(page) > base
+    label = page.locator(".card-size-value").inner_text()
+    assert label == "160%" or label.endswith("% max")
+    # the cards are drawn at that size: no creature row had to shrink (unless even the smallest cards don't fit)
+    assert card_width(page) == 48 or page.evaluate("() => [...document.querySelectorAll('.zone.creatures')].every(z => !z.style.getPropertyValue('--fit'))")
+    assert page.errors == []
 
 
 def test_crowded_rows_shrink_instead_of_wrapping(browser):
