@@ -5,10 +5,13 @@ import com.google.gson.JsonObject;
 import mage.MageObject;
 import mage.MageObjectReference;
 import mage.abilities.Ability;
+import mage.abilities.StaticAbility;
 import mage.abilities.decorator.ConditionalContinuousEffect;
 import mage.abilities.condition.Condition;
 import mage.abilities.dynamicvalue.DynamicValue;
 import mage.abilities.effects.ContinuousEffect;
+import mage.abilities.effects.ContinuousEffects;
+import mage.abilities.effects.ContinuousEffectsList;
 import mage.constants.Duration;
 import mage.constants.Layer;
 import mage.counters.Counter;
@@ -18,6 +21,7 @@ import mage.game.permanent.Permanent;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,7 +41,10 @@ import java.util.regex.Pattern;
  * gets ..."), or their filter ("creatures you control get ..."). The power/toughness totals are exact whatever the
  * attribution finds: {@code current = printed (or set) + counters + effects}.
  * <p>
- * One instance per state build; must be called from the game thread. Never changes the game.
+ * One instance per state build. It only reads: nothing is written to the game, its effects or their timestamps
+ * (see {@link #layeredEffects()}; ContinuousEffects.getLayeredEffects would renumber them), so explained views can't
+ * change how a game plays. It also runs off the game thread (GameSession.tryBuildState); a read that races the game
+ * just drops the explanation.
  */
 final class Explain {
 
@@ -131,7 +138,7 @@ final class Explain {
     private List<Active> active() {
         if (active == null) {
             active = new ArrayList<>();
-            for (ContinuousEffect effect : game.getContinuousEffects().getLayeredEffects(game)) {
+            for (ContinuousEffect effect : layeredEffects()) {
                 if (effect.isDiscarded() || !relevant(effect)) {
                     continue;
                 }
@@ -142,6 +149,46 @@ final class Explain {
             }
         }
         return active;
+    }
+
+    /**
+     * The layered effects that apply now, as ContinuousEffects.getLayeredEffects(game) selects them, but read
+     * without its side effects: that method also renumbers the effects' timestamps (updateTimestamps, setOrder)
+     * and replaces its record of the last list it returned, which apply() uses. This copies the engine's list
+     * under the same lock and applies the same filter (effects from static abilities only while those are in
+     * a usable zone); nothing is written. The order is the effects' current timestamps.
+     */
+    private List<ContinuousEffect> layeredEffects() {
+        ContinuousEffects effects = game.getContinuousEffects();
+        Object list = field(effects, "layeredEffects", ContinuousEffectsList.class);
+        if (!(list instanceof ContinuousEffectsList)) {
+            return List.of();
+        }
+        ContinuousEffectsList<?> all = (ContinuousEffectsList<?>) list;
+        List<ContinuousEffect> copy;
+        synchronized (effects) {
+            copy = new ArrayList<>(all);
+        }
+        List<ContinuousEffect> out = new ArrayList<>();
+        for (ContinuousEffect effect : copy) {
+            switch (effect.getDuration()) {
+                case WhileOnBattlefield:
+                case WhileControlled:
+                case WhileOnStack:
+                case WhileInGraveyard:
+                    for (Ability ability : all.getAbility(effect.getId())) {
+                        if (!(ability instanceof StaticAbility) || ability.isInUseableZone(game, null, null)) {
+                            out.add(effect);
+                            break;
+                        }
+                    }
+                    break;
+                default:
+                    out.add(effect);
+            }
+        }
+        out.sort(Comparator.comparingLong(ContinuousEffect::getOrder));
+        return out;
     }
 
     /** Layers a player would want explained: control, type, color, abilities, power/toughness. */
