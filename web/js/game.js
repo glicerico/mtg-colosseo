@@ -700,8 +700,12 @@ export class GameView {
     for (const row of this.root.querySelectorAll('.zone, .hand-row.bottom')) {
       row.style.removeProperty('--fit');
       if (!row.children.length) continue;
-      const over = row.scrollWidth / Math.max(1, row.clientWidth);
-      if (over > 1.001) row.style.setProperty('--fit', Math.max(0.35, 0.98 / over).toFixed(3));
+      // gaps and margins don't shrink with the cards: converge in a few measured steps
+      let fit = 1;
+      for (let i = 0; i < 4 && row.scrollWidth > row.clientWidth + 1 && fit > 0.35; i++) {
+        fit = Math.max(0.35, fit * 0.98 * row.clientWidth / row.scrollWidth);
+        row.style.setProperty('--fit', fit.toFixed(3));
+      }
     }
   }
   addExtra(id, cls) {
