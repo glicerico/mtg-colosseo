@@ -246,3 +246,26 @@ engine's keyword abilities, current: `"flying"`, `"menace"`, `"kicker {3}{B}"`, 
 (creatures, current values), `loyalty`, `counters`, `owner`, `token`. Permanents add `controller`, `tapped`,
 `summoning_sick`, `damage`, `attacking`, `blocking`, `attached_to`, `attachments`, `face_down`, `transformed`.
 Face-down objects you don't control appear as `{"id", "name": "Face-down creature", "hidden": true, …}`.
+
+**Browser views only:** in the states sent to seats of type `human` and to spectators (the web UI), visible
+permanents also carry `explain`, which says why they look the way they do. Agents' observations (seats of type
+`agent`, the environment) never include it. It is present on creatures, and on other permanents with effects
+acting on them:
+
+```json
+"explain": {
+  "printed": [2, 3],          // creatures: printed power/toughness
+  "set": [0, 1],              // only when an effect set the base power/toughness
+  "counters": [2, 2],         // only when nonzero: what +1/+1, -1/-1, ... counters add
+  "effects_pt": [3, 0],       // only when nonzero: what continuous effects add (current - set/printed - counters)
+  "effects": [{"source": "Sure Strike", "source_id": "…", "text": "Target creature gets +3/+0",
+               "duration": "until end of turn", "layer": "pt", "power": 3, "toughness": 0}],
+  "modified": true            // power/toughness differ from printed, or effects act on it
+}
+```
+
+`effects` lists the engine's continuous effects that apply to the permanent (layers: `control`, `type`, `color`,
+`abilities`, `pt`), with their source and duration; `power`/`toughness` appear when the effect declares a fixed
+boost. Attribution follows what each effect references (its affected objects, targets, source, attachment or
+filter); the totals always add up, whatever the attribution finds. A source that is hidden from the viewer is
+named "a hidden card".

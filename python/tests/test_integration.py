@@ -48,3 +48,38 @@ def test_illegal_action_is_rejected():
     d2, _, _, info = env.step(Action({"choice": "not-an-option"}))
     assert info.get("rejected") and d2.id == d.id
     env.close()
+
+
+class _Recorder(HeuristicAgent):
+    """Plays like the heuristic and keeps every decision's battlefield."""
+
+    def __init__(self):
+        super().__init__()
+        self.battlefields = []
+
+    def decide(self, d):
+        self.battlefields.append([c for p in (d.raw.get("state") or {}).get("players", []) for c in p.get("battlefield", [])])
+        return super().decide(d)
+
+
+def test_explanations_reach_browser_seats_only():
+    """`explain` (printed vs current power/toughness, effects) is for the web UI: a seat of type human gets it,
+    an agent's observation never does."""
+    import threading
+    from colosseo import play
+    client = ColosseoClient(SERVER)
+    game = client.create_game([{"type": "human", "deck": "fdn:gruul-stompers", "stop_policy": "all"},
+                               {"type": "agent", "deck": "fdn:selesnya-pack"}],
+                              seed=7, max_turns=8, record=False)
+    tokens = {s["seat"]: s.get("token") for s in game["seats"]}
+    human, agent = _Recorder(), _Recorder()
+    threads = [threading.Thread(target=play, args=(a, game["game_id"], seat, SERVER), kwargs={"token": tokens[seat]})
+               for seat, a in ((0, human), (1, agent))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(300)
+    human_creatures = [c for bf in human.battlefields for c in bf if "Creature" in (c.get("types") or [])]
+    assert human_creatures, "no creature reached the battlefield"
+    assert all("explain" in c and c["explain"]["printed"] for c in human_creatures if not c.get("hidden"))
+    assert not any("explain" in c for bf in agent.battlefields for c in bf)

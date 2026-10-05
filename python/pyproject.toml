@@ -14,6 +14,7 @@ dependencies = ["websockets>=12"]
 [project.optional-dependencies]
 llm = ["anthropic"]
 dev = ["pytest", "pytest-timeout"]
+ui = ["pytest", "playwright"]
 
 [project.scripts]
 colosseo = "colosseo.cli:main"
