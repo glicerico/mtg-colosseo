@@ -268,4 +268,5 @@ acting on them:
 `abilities`, `pt`), with their source and duration; `power`/`toughness` appear when the effect declares a fixed
 boost. Attribution follows what each effect references (its affected objects, targets, source, attachment or
 filter); the totals always add up, whatever the attribution finds. A source that is hidden from the viewer is
-named "a hidden card".
+named "a hidden card". Building `explain` only reads the game (it writes nothing, not even effect timestamps), so explained
+views never change how a game plays; `test_explanations_do_not_change_play` checks this.
