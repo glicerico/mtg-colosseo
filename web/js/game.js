@@ -1,7 +1,7 @@
 // Game board: renders the observation and turns clicks into protocol actions.
 import { wsUrl, getGame, seatToken, ownerToken, forgetToken } from './api.js';
 import { h, modal, toast, closeAllModals, manaSymbols, escapeRules } from './ui.js';
-import { renderCard, cardBack, hidePreview, settings, setImages } from './cards.js';
+import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE } from './cards.js';
 
 const STEPS = [
   ['UNTAP', 'Untap'], ['UPKEEP', 'Upkeep'], ['DRAW', 'Draw'], ['PRECOMBAT_MAIN', 'Main 1'],
@@ -18,6 +18,12 @@ const KIND_TITLES = {
 
 const isLand = (c) => (c.types || []).includes('Land') && !(c.types || []).includes('Creature');
 const isCreature = (c) => (c.types || []).includes('Creature');
+
+// Card width limits (px) and how many card widths the board needs vertically: the opponent's land/other row
+// (lands are .72 wide) and creature row, ours, and our hand (.95 wide), each card 1.395 times as tall as wide.
+const CARD_MIN = 48;
+const CARD_MAX = 330;
+const BOARD_CARD_HEIGHTS = (0.72 + 1.1 + 1.1 + 0.72 + 0.95) * 1.395;
 
 export class GameView {
   constructor(root, gameId, seat) {
@@ -39,15 +45,21 @@ export class GameView {
     this.retryMs = 1000;
     this.destroyed = false;
     this.pollTimer = null;
+    this.groups = new Map(); // wrappers for token stacks and attachment groups, by key
     this.keyHandler = (e) => this.onKey(e);
     document.addEventListener('keydown', this.keyHandler);
+    this.resizeHandler = () => this.fit();
+    window.addEventListener('resize', this.resizeHandler);
     this.build();
+    this.fit();
     this.connect();
   }
 
   destroy() {
     this.destroyed = true;
     document.removeEventListener('keydown', this.keyHandler);
+    window.removeEventListener('resize', this.resizeHandler);
+    for (const v of ['--card-w', '--ui']) document.documentElement.style.removeProperty(v);
     clearInterval(this.pollTimer);
     if (this.ws) this.ws.close();
     document.getElementById('conn-status').textContent = '';
@@ -59,16 +71,20 @@ export class GameView {
 
   build() {
     this.root.className = 'game-page';
+    // per player: creatures nearest the middle; then lands and the other permanents (artifacts, enchantments,
+    // planeswalkers, ...) side by side; then the player and the hand
     this.el = {
       topInfo: h('div', { class: 'player-info top' }),
       topHand: h('div', { class: 'hand-row top' }),
-      topLands: h('div', { class: 'zone-row lands' }),
-      topPerms: h('div', { class: 'zone-row perms' }),
+      topLands: h('div', { class: 'zone lands', title: 'Lands' }),
+      topOthers: h('div', { class: 'zone others', title: 'Other permanents' }),
+      topCreatures: h('div', { class: 'zone creatures' }),
       phase: h('div', { class: 'phase-bar' }),
       stack: h('div', { class: 'stack-area' }),
       center: h('div', { class: 'center-msg' }),
-      botPerms: h('div', { class: 'zone-row perms' }),
-      botLands: h('div', { class: 'zone-row lands' }),
+      botCreatures: h('div', { class: 'zone creatures' }),
+      botLands: h('div', { class: 'zone lands', title: 'Lands' }),
+      botOthers: h('div', { class: 'zone others', title: 'Other permanents' }),
       botInfo: h('div', { class: 'player-info bottom' }),
       botHand: h('div', { class: 'hand-row bottom' }),
       prompt: h('div', { class: 'prompt-bar' }),
@@ -77,13 +93,17 @@ export class GameView {
       banner: h('div', { class: 'banner hidden' }),
     };
     const e = this.el;
+    const permRow = (lands, others) => h('div', { class: 'perm-row' }, lands, others);
     const board = h('div', { class: 'board' },
       e.banner,
-      h('div', { class: 'side top' }, h('div', { class: 'info-hand' }, e.topInfo, e.topHand), e.topLands, e.topPerms),
+      h('div', { class: 'side top' }, h('div', { class: 'info-hand' }, e.topInfo, e.topHand),
+        permRow(e.topLands, e.topOthers), e.topCreatures),
       h('div', { class: 'middle' }, e.phase, h('div', { class: 'middle-row' }, e.center, e.stack)),
-      h('div', { class: 'side bottom' }, e.botPerms, e.botLands, h('div', { class: 'info-hand' }, e.botInfo, e.botHand)),
+      h('div', { class: 'side bottom' }, e.botCreatures, permRow(e.botLands, e.botOthers),
+        h('div', { class: 'info-hand' }, e.botInfo, e.botHand)),
       e.prompt);
     board.addEventListener('click', (ev) => this.onBoardClick(ev));
+    this.board = board;
     this.root.append(board, h('aside', { class: 'sidebar' }, e.header, e.log));
     this.renderHeader();
   }
@@ -281,8 +301,21 @@ export class GameView {
       }, rev, ' Show hands'));
     }
     const img = h('input', { type: 'checkbox', checked: settings.images });
-    img.addEventListener('change', () => { setImages(img.checked); this.cache.clear(); this.render(); });
+    img.addEventListener('change', () => { setImages(img.checked); this.cache.clear(); this.groups.clear(); this.render(); });
     controls.push(h('label', { class: 'toggle' }, img, ' Images'));
+    const size = h('input', {
+      type: 'range', class: 'card-size', min: CARD_SCALE.min, max: CARD_SCALE.max, step: CARD_SCALE.step,
+      value: settings.cardScale, 'aria-label': 'Card size',
+    });
+    const pct = h('span', { class: 'card-size-value' }, `${Math.round(settings.cardScale * 100)}%`);
+    size.addEventListener('input', () => {
+      setCardScale(parseFloat(size.value));
+      pct.textContent = `${Math.round(settings.cardScale * 100)}%`;
+      this.fit();
+    });
+    size.addEventListener('dblclick', () => { size.value = 1; size.dispatchEvent(new Event('input')); });
+    controls.push(h('label', { class: 'toggle size-control', title: 'Card size (100% fits the window; double-click to reset)' },
+      'Cards ', size, pct));
     e.header.replaceChildren(
       h('div', { class: 'side-title' }, h('a', { href: '#/' }, '←'), ' ', title),
       h('div', { class: 'side-sub mono' }, `game ${this.gameId}`, this.isPlayer ? ` · seat ${this.seat}` : ' · spectator'),
@@ -387,6 +420,13 @@ export class GameView {
     this.renderPhase();
     this.renderStack();
     this.renderPrompt();
+    this.squeeze();
+    const pin = pinnedCard();
+    if (pin) {
+      // keep a pinned explanation current (stats change while it is open)
+      const now = (this.state.players || []).flatMap((q) => q.battlefield || []).find((c) => c.id === pin.id);
+      if (now) showPreview(now, true); else hidePreview(true);
+    }
   }
 
   /** Builds per-object highlight classes, badges and click handlers for the pending decision. */
@@ -487,6 +527,7 @@ export class GameView {
   cardEl(card) {
     const x = this.extras.get(card.id) || {};
     const el = renderCard(this.cache, card, x);
+    el.classList.remove('attached', 'foreign'); // set again by itemEl when it still is
     if (this.clickable.has(card.id)) el.classList.add('clickable');
     return el;
   }
@@ -503,8 +544,6 @@ export class GameView {
     const e = this.el;
     const info = where === 'top' ? e.topInfo : e.botInfo;
     const hand = where === 'top' ? e.topHand : e.botHand;
-    const lands = where === 'top' ? e.topLands : e.botLands;
-    const perms = where === 'top' ? e.topPerms : e.botPerms;
     if (!p) { info.replaceChildren(); return; }
 
     const x = this.extras.get(p.id) || { classes: [] };
@@ -539,27 +578,132 @@ export class GameView {
       hand.replaceChildren(...Array.from({ length: Math.min(p.hand_count, 10) }, () => cardBack()));
     }
 
-    // battlefield: lands in one row, everything else (creatures first, attachments after hosts) in the other
-    const bf = p.battlefield || [];
-    const landCards = bf.filter(isLand).sort((a, b) => (a.name > b.name ? 1 : a.name < b.name ? -1 : (a.tapped - b.tapped)));
-    const others = bf.filter((c) => !isLand(c));
-    const hostHere = (c) => c.attached_to && others.some((o) => o.id === c.attached_to);
-    const hosts = others.filter((c) => !hostHere(c));
-    hosts.sort((a, b) => (isCreature(b) - isCreature(a)));
-    const ordered = [];
-    for (const c of hosts) {
-      ordered.push(c);
-      for (const a of others) if (a.attached_to === c.id) ordered.push(a);
-    }
-    // untapped lands with the same name are drawn as a pile; auras/equipment tuck under their host
-    landCards.forEach((c, i) => {
-      if (i > 0 && !c.tapped && !landCards[i - 1].tapped && landCards[i - 1].name === c.name) this.addExtra(c.id, 'stacked');
-    });
-    ordered.forEach((c) => { if (hostHere(c)) this.addExtra(c.id, 'attached'); });
-    this.renderZone(lands, landCards);
-    this.renderZone(perms, ordered);
+    this.renderBattlefield(p, where);
   }
 
+  /**
+   * Lays out one player's battlefield: creatures in one row, lands and the other permanents in their own areas.
+   * Auras and equipment stay with what they are attached to (whoever controls them); identical tokens are
+   * stacked with a count.
+   */
+  renderBattlefield(p, where) {
+    const e = this.el;
+    const all = (this.state.players || []).flatMap((q) => q.battlefield || []);
+    const onField = new Set(all.map((c) => c.id));
+    const isAttached = (c) => c.attached_to && onField.has(c.attached_to) && c.attached_to !== c.id;
+    const attachmentsOf = (c) => all.filter((a) => a.attached_to === c.id && isAttached(a));
+    const bf = (p.battlefield || []).filter((c) => !isAttached(c));
+    const creatures = bf.filter(isCreature);
+    const lands = bf.filter((c) => isLand(c)).sort((a, b) => (a.name > b.name ? 1 : a.name < b.name ? -1 : (a.tapped - b.tapped)));
+    const others = bf.filter((c) => !isCreature(c) && !isLand(c));
+    // lands with the same name and tapped state are drawn as a pile
+    lands.forEach((c, i) => {
+      if (i > 0 && lands[i - 1].tapped === c.tapped && lands[i - 1].name === c.name && !attachmentsOf(c).length) this.addExtra(c.id, 'stacked');
+    });
+    const lands2 = where === 'top' ? e.topLands : e.botLands;
+    const others2 = where === 'top' ? e.topOthers : e.botOthers;
+    const creatures2 = where === 'top' ? e.topCreatures : e.botCreatures;
+    this.renderItems(creatures2, this.items(creatures, attachmentsOf, p));
+    this.renderItems(lands2, this.items(lands, attachmentsOf, p, false));
+    this.renderItems(others2, this.items(others, attachmentsOf, p));
+    others2.classList.toggle('empty', !others.length);
+  }
+
+  /** Display items for a row: a card, a card with its attachments, or a stack of identical tokens. */
+  items(cards, attachmentsOf, owner, stackTokens = true) {
+    const out = [];
+    const stacks = new Map();
+    for (const c of cards) {
+      const atts = attachmentsOf(c);
+      if (atts.length) {
+        out.push({ key: `att:${c.id}`, host: c, attachments: atts, owner });
+        continue;
+      }
+      if (stackTokens && c.token) {
+        const x = this.extras.get(c.id) || {};
+        const k = JSON.stringify([c.name, c.power, c.toughness, c.tapped, c.damage, c.counters, c.summoning_sick,
+          c.attacking, c.blocking, c.explain, x.classes, x.badges, this.clickable.has(c.id)]);
+        if (stacks.has(k)) { stacks.get(k).members.push(c); continue; }
+        const item = { key: null, host: c, members: [c], owner };
+        stacks.set(k, item);
+        out.push(item);
+        continue;
+      }
+      out.push({ key: null, host: c, owner });
+    }
+    for (const it of out) if (it.members && it.members.length > 1) it.key = `stk:${it.host.id}`;
+    return out;
+  }
+
+  itemEl(it) {
+    const host = this.cardEl(it.host);
+    if (!it.key) return host;
+    let w = this.groups.get(it.key);
+    if (!w) {
+      w = h('div', { dataset: { group: it.key } });
+      this.groups.set(it.key, w);
+    }
+    let kids;
+    if (it.attachments) {
+      w.className = 'attach-group';
+      kids = [...it.attachments.map((a) => {
+        const el = this.cardEl(a);
+        el.classList.add('attached');
+        el.classList.toggle('foreign', a.controller !== it.host.controller);
+        el.title = a.controller !== it.host.controller ? `${a.name} (controlled by ${this.nameOf(a.controller)})` : '';
+        return el;
+      }), host];
+    } else {
+      w.className = 'token-stack';
+      w.dataset.count = it.members.length;
+      w.title = `${it.members.length} × ${it.host.name}`;
+      let badge = w.querySelector(':scope > .stack-count');
+      if (!badge) badge = h('span', { class: 'stack-count' });
+      badge.textContent = `×${it.members.length}`;
+      kids = [host, badge];
+    }
+    if (kids.some((k, i) => w.children[i] !== k) || w.children.length !== kids.length) w.replaceChildren(...kids);
+    return w;
+  }
+
+  renderItems(container, items) {
+    const els = items.map((it) => this.itemEl(it));
+    const current = Array.from(container.children);
+    els.forEach((el, i) => { if (current[i] !== el) container.insertBefore(el, container.children[i] || null); });
+    while (container.children.length > els.length) container.lastChild.remove();
+  }
+
+  // --- sizing ----------------------------------------------------------------------------------------
+
+  /**
+   * Sizes cards to the window: the largest width at which both players' rows and the hand fit the board's
+   * height (and a row of creatures its width), times the player's card-size setting, within CARD_MIN..CARD_MAX.
+   * --ui scales the rest of the interface (text, buttons, player panels) on large screens.
+   */
+  fit() {
+    if (!this.board) return;
+    const root = document.documentElement.style;
+    const ui = Math.min(2.2, Math.max(0.85, Math.min(window.innerWidth / 1920, window.innerHeight / 1080)));
+    root.setProperty('--ui', ui.toFixed(3));
+    const H = this.board.clientHeight;
+    const W = this.board.clientWidth;
+    if (!H || !W) return;
+    const fixed = 250 * ui; // prompt bar, phase bar, opponent's info row, gaps and paddings
+    const auto = Math.min((H - fixed) / BOARD_CARD_HEIGHTS, (W - 24) / 10.5);
+    const w = Math.round(Math.min(CARD_MAX, Math.max(CARD_MIN, auto * settings.cardScale)));
+    root.setProperty('--card-w', `${w}px`);
+    this.squeeze();
+  }
+
+  /** Shrinks the cards of any row that would not fit its width, instead of wrapping it onto a second line. */
+  squeeze() {
+    for (const row of this.root.querySelectorAll('.zone, .hand-row.bottom')) {
+      row.style.removeProperty('--fit');
+      if (!row.children.length) continue;
+      const over = row.scrollWidth / Math.max(1, row.clientWidth);
+      if (over > 1.001) row.style.setProperty('--fit', Math.max(0.35, 0.98 / over).toFixed(3));
+    }
+  }
   addExtra(id, cls) {
     if (!this.extras.has(id)) this.extras.set(id, { classes: [], badges: [] });
     this.extras.get(id).classes.push(cls);
@@ -741,14 +885,21 @@ export class GameView {
 
   onBoardClick(ev) {
     const target = ev.target.closest('[data-id]');
-    if (!target) return;
+    if (!target) { hidePreview(true); return; }
     const id = target.dataset.id;
     const fn = this.clickable && this.clickable.get(id);
     if (fn) {
       ev.stopPropagation();
-      hidePreview();
+      hidePreview(true);
       fn(target);
+      return;
     }
+    // a click on a card that has nothing to do pins (or unpins) its explanation
+    const card = target.classList.contains('card') && target._card;
+    if (!card) return;
+    const pinned = pinnedCard();
+    if (pinned && pinned.id === card.id) hidePreview(true);
+    else showPreview(card, true);
   }
 
   onKey(ev) {
