@@ -155,6 +155,14 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
   same game, even with other games running. Matches follow a schedule computed from their seed (deck pairings,
   seats, alternating starting player, one engine seed per game). XMage's own AI is not deterministic
   (time-bounded search).
+- **Playing in the browser**: a human seat's board sizes cards to the window and to what is on it (a Cards
+  slider scales them), keeps creatures, lands and other permanents in their own areas, explains modified
+  power/toughness, keeps the hand in a stable order (new cards at the right end, highlighted for a moment), asks
+  the London mulligan keep-first, and shows tokens' pictures. The opponent's actions are shown step by step: the
+  card being cast and its targets, triggers and their source, attacks, blocks, damage, cards moving between
+  zones, each linked to its log line. The sidebar's Actions setting sets the pace (Slow, Normal, Fast, Off), and
+  Skip or Esc shows the board as it is now. The data behind it (`explain`, `token_image`, `event` messages) is
+  sent to browser views only; agents never get it (docs/protocol.md).
 - **Records**: `data/games/<id>.jsonl` pins the engine, XMage, deck and agent versions. A record holds both
   players' observations; `GET /api/games/{id}/record?seat=N` (or `colosseo record ID --seat N`) gives the view
   of one seat, suitable for handing to that agent.
