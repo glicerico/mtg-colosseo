@@ -70,6 +70,7 @@ Options for `agent`/`human` seats:
 | `stop_policy` | `"all"` / `"arena"` | `all`: ask at every priority with legal actions. `arena`: only in your main phases, during combat and when the opponent puts something on the stack |
 | `yield_after_cast` | `false` / `true` | pass automatically right after casting/activating (let it resolve) |
 | `auto_pay` | `true` / `true` | pay mana costs automatically; otherwise `pay_mana` decisions are raised |
+| `mulligan_keep_first` | `false` / `true` | London mulligan asked as MTG Arena and MTGO ask it: keep or mulligan looking at the new seven cards, and once kept, the cards to put on the bottom (as many as mulligans taken). `false`: XMage's order, CR 103.5 as written (each mulligan's bottom cards right after its new seven, then keep or mulligan on the smaller hand). Both give the same choices and opening hands. Not for `xmage` seats: XMage's AI decides its mulligans counting on its own order |
 | `timeout_s` | `0` | apply the decision's default after this many seconds (0 = wait forever); counted as a `"timeout"` fallback |
 | `time_bank_s` | `0` | chess clock: total thinking time for the game, measured from the moment each decision is sent; running out forfeits it, including an answer that arrives after the time ran out (0 = no clock) |
 | `agent_id` | name | identity in records and ratings, e.g. `"my-agent@1.2"` (the SDK sends `name@version`) |
@@ -209,7 +210,7 @@ decision.
 | kind | extra fields | answer |
 |---|---|---|
 | `priority` | options have `action` (`cast`, `play_land`, `activate`, `special`, `pass`, `pass_turn`), `source_id`, `source_name`, `zone`, `mana_cost` | `{"choice": id}` |
-| `mulligan` | `hand_size` | `{"choice": "keep" \| "mulligan"}` |
+| `mulligan` | `hand_size`; with `mulligan_keep_first`, `bottom_on_keep` (how many of these cards go to the bottom if kept: the `target` decisions that follow a keep) | `{"choice": "keep" \| "mulligan"}` |
 | `yes_no` | `source_id` | `{"choice": "yes" \| "no"}` (labels may say e.g. "Pay") |
 | `target` | `min`, `max`, `required`, `chosen`, `zone`, `source_id`, `source_name`; options describe objects (`kind`: player/permanent/card/spell, `name`, `controller`, P/T...); `cards` (full card objects when choosing from hidden zones: library searches, scry, opponent's hand) | `{"choice": id}` one target at a time (`selected` options toggle off; `"done"` finishes when allowed) or `{"choices": [id, …]}` to pick several and finish |
 | `choose_mode` | - | `{"choice": mode id}` |

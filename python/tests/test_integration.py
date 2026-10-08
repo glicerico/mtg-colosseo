@@ -183,7 +183,7 @@ def test_explanations_do_not_change_play(seed):
         game = ColosseoClient(SERVER).create_game(
             # names and the seat options human and agent seats default differently, set alike
             [{"type": seat_type, "name": f"P{s}", "deck": deck[s], "stop_policy": "all", "auto_pass": True, "auto_pay": True,
-              "yield_after_cast": False} for s in (0, 1)],
+              "yield_after_cast": False, "mulligan_keep_first": True} for s in (0, 1)],
             seed=seed, starting_seat=0, max_turns=20, pace_ms=5, record=False)
         tokens = {s["seat"]: s.get("token") for s in game["seats"]}
         stop, seen = threading.Event(), [0]
@@ -204,3 +204,59 @@ def test_explanations_do_not_change_play(seed):
         assert len(plain[s]) == len(explained[s]) > 20
         for i, (a, b) in enumerate(zip(plain[s], explained[s])):
             assert a == b, f"seat {s}, decision {i}"
+
+
+class _Mulligans(HeuristicAgent):
+    """Takes `n` mulligans, then keeps; records each opening-hand question in order: (kind, cards in hand,
+    bottom_on_keep), the bottom choices as ("bottom", cards in hand, None); and the hand it starts the game with."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.n, self.taken, self.steps, self.opening = n, 0, [], None
+
+    def decide(self, d):
+        st = d.raw.get("state") or {}
+        hand = next((p["hand_count"] for p in st.get("players", []) if p.get("id") == st.get("you")), None)
+        if d.kind == "mulligan":
+            self.steps.append(("mulligan", hand, d.raw.get("bottom_on_keep")))
+            if self.taken < self.n:
+                self.taken += 1
+                return d.choose("mulligan")
+            return d.choose("keep")
+        if d.kind == "target" and "bottom of your library" in (d.prompt or ""):
+            self.steps.append(("bottom", hand, None))
+        elif self.opening is None:
+            self.opening = hand
+        return super().decide(d)
+
+
+def _two_mulligans(seat_type):
+    import threading
+    from colosseo import play
+    game = ColosseoClient(SERVER).create_game([{"type": seat_type, "deck": "fdn:azorius-skies", "stop_policy": "all"},
+                                               {"type": "xmage", "deck": "fdn:gruul-stompers"}],
+                                              seed=2026, starting_seat=0, max_turns=1, record=False)
+    agent = _Mulligans(2)
+    t = threading.Thread(target=play, args=(agent, game["game_id"], 0, SERVER),
+                         kwargs={"token": game["seats"][0].get("token")})
+    t.start()
+    t.join(300)
+    return agent
+
+
+def test_human_seats_keep_before_putting_cards_on_the_bottom():
+    """London mulligan, as MTG Arena and MTGO ask it: a human seat decides keep-or-mulligan looking at seven new
+    cards each time, and puts cards on the bottom only once it keeps (as many as mulligans taken)."""
+    agent = _two_mulligans("human")
+    assert agent.steps == [("mulligan", 7, 0), ("mulligan", 7, 1), ("mulligan", 7, 2), ("bottom", 7, None),
+                           ("bottom", 6, None)]
+    assert agent.opening == 5
+
+
+def test_agent_seats_keep_the_xmage_mulligan_order():
+    """Agents' observations are unchanged: XMage's order (CR 103.5 as written), each mulligan's bottom cards
+    right after its new seven, then keep-or-mulligan on the smaller hand; no bottom_on_keep."""
+    agent = _two_mulligans("agent")
+    assert agent.steps == [("mulligan", 7, None), ("bottom", 7, None), ("mulligan", 6, None), ("bottom", 7, None),
+                           ("bottom", 6, None), ("mulligan", 5, None)]
+    assert agent.opening == 5

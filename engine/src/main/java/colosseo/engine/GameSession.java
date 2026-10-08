@@ -14,7 +14,6 @@ import mage.game.match.MatchOptions;
 import mage.game.events.Listener;
 import mage.game.events.PlayerQueryEvent;
 import mage.game.events.TableEvent;
-import mage.game.mulligan.MulliganType;
 import mage.player.ai.ComputerPlayerControllableProxy;
 import mage.players.Player;
 import mage.players.net.UserData;
@@ -135,8 +134,10 @@ public final class GameSession {
         // every game runs with a known seed (recorded in the config and the result) so it can be replayed
         seed = config.seed != null ? config.seed : new java.security.SecureRandom().nextLong() & Long.MAX_VALUE;
         RandomUtil.setSeed(seed);
-        game = new TwoPlayerDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE,
-                MulliganType.GAME_DEFAULT.getMulligan(0), 40, config.startingLife, 7);
+        // the London mulligan; seats with mulligan_keep_first (human seats by default) decide keep-or-mulligan before
+        // putting cards on the bottom
+        KeepFirstLondonMulligan mulligan = new KeepFirstLondonMulligan(0);
+        game = new TwoPlayerDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE, mulligan, 40, config.startingLife, 7);
         GameOptions options = new GameOptions();
         options.rollbackTurnsAllowed = false;
         game.setGameOptions(options);
@@ -152,6 +153,9 @@ public final class GameSession {
             seat.playerId = player.getId();
             if (player instanceof BridgePlayer) {
                 ((BridgePlayer) player).attachSeat(seat);
+            }
+            if (sc.mulliganKeepFirst) {
+                mulligan.keepFirst(player.getId());
             }
             stableIds.addPlayer(player.getId(), seat.index);
             stableIds.addDeck(seat.index, deck.getCards());
