@@ -118,8 +118,8 @@ def _trace(game_id, tokens):
                         collect(v)
 
             def unid(x):
-                if isinstance(x, dict):
-                    return {k: unid(v) for k, v in x.items()}
+                if isinstance(x, dict):  # ids are keys too (e.g. a blocker's simulated_outcomes, per attacker)
+                    return {unid(k): unid(v) for k, v in x.items()}
                 if isinstance(x, list):
                     return [unid(v) for v in x]
                 if isinstance(x, str):
