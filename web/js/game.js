@@ -1,7 +1,7 @@
 // Game board: renders the observation and turns clicks into protocol actions.
 import { wsUrl, getGame, seatToken, ownerToken, forgetToken } from './api.js';
 import { h, modal, toast, closeAllModals, manaSymbols, escapeRules } from './ui.js';
-import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE } from './cards.js';
+import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE, onTokenImage } from './cards.js';
 
 const STEPS = [
   ['UNTAP', 'Untap'], ['UPKEEP', 'Upkeep'], ['DRAW', 'Draw'], ['PRECOMBAT_MAIN', 'Main 1'],
@@ -18,6 +18,10 @@ const KIND_TITLES = {
 
 const isLand = (c) => (c.types || []).includes('Land') && !(c.types || []).includes('Creature');
 const isCreature = (c) => (c.types || []).includes('Creature');
+/** The order of a new hand: lands first, then by mana value. */
+const sortHand = (cards) => [...cards].sort((a, b) => (isLand(b) - isLand(a)) || ((a.mana_value || 0) - (b.mana_value || 0)));
+// how long a card that just arrived in hand stays highlighted (ms)
+const NEW_IN_HAND_MS = 2500;
 
 // Card width limits (px); the size of lands and other permanents, and of the cards in hand, relative to creatures:
 // full size, and the smallest they shrink to before the creatures do.
@@ -76,10 +80,13 @@ export class GameView {
     this.destroyed = false;
     this.pollTimer = null;
     this.groups = new Map(); // wrappers for token stacks and attachment groups, by key
+    this.handOrder = null; // ids of the cards in this player's hand, left to right (null: no hand seen yet)
+    this.newInHand = new Map(); // id -> time until which a card that just arrived in hand is highlighted
     this.keyHandler = (e) => this.onKey(e);
     document.addEventListener('keydown', this.keyHandler);
     this.resizeHandler = () => this.layout();
     window.addEventListener('resize', this.resizeHandler);
+    this.offTokenImage = onTokenImage(() => { if (!this.destroyed) this.render(); }); // a token's image was found
     this.build();
     this.layout();
     this.connect();
@@ -89,8 +96,10 @@ export class GameView {
     this.destroyed = true;
     document.removeEventListener('keydown', this.keyHandler);
     window.removeEventListener('resize', this.resizeHandler);
+    this.offTokenImage();
     for (const v of ['--card-w', '--ui', '--land-k', '--hand-k']) document.documentElement.style.removeProperty(v);
     clearInterval(this.pollTimer);
+    clearTimeout(this.newInHandTimer);
     if (this.ws) this.ws.close();
     document.getElementById('conn-status').textContent = '';
   }
@@ -599,15 +608,42 @@ export class GameView {
 
     // hand
     if (p.hand) {
-      const sorted = [...p.hand].sort((a, b) => (isLand(b) - isLand(a)) || ((a.mana_value || 0) - (b.mana_value || 0)));
+      const cards = where === 'bottom' ? this.orderHand(p.hand) : sortHand(p.hand);
+      const now = Date.now();
+      for (const c of cards) if ((this.newInHand.get(c.id) || 0) > now) this.addExtra(c.id, 'new-in-hand');
       hand.classList.remove('backs');
-      this.renderZone(hand, sorted);
+      this.renderZone(hand, cards);
     } else {
       hand.classList.add('backs');
       hand.replaceChildren(...Array.from({ length: Math.min(p.hand_count, 10) }, () => cardBack()));
     }
 
     this.renderBattlefield(p, where);
+  }
+
+  /**
+   * This player's hand in a stable order, as in Arena: sorted until the game starts (the opening hand, through the
+   * mulligans) and when the page loads; from then on, every card that arrives (a draw, a card returned to hand) is
+   * added at the right end, where it is highlighted for a moment, and the other cards keep their places.
+   */
+  orderHand(cards) {
+    const ids = new Set(cards.map((c) => c.id));
+    const kept = (this.handOrder || []).filter((id) => ids.has(id));
+    const arrived = cards.filter((c) => !kept.includes(c.id));
+    if (this.handOrder === null || !this.state.step) { // no step yet: the mulligans
+      this.handOrder = sortHand(cards).map((c) => c.id);
+      this.newInHand.clear();
+    } else {
+      this.handOrder = [...kept, ...arrived.map((c) => c.id)];
+      if (arrived.length) {
+        const until = Date.now() + NEW_IN_HAND_MS;
+        for (const c of arrived) this.newInHand.set(c.id, until);
+        clearTimeout(this.newInHandTimer);
+        this.newInHandTimer = setTimeout(() => { if (!this.destroyed) this.render(); }, NEW_IN_HAND_MS + 50);
+      }
+    }
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    return this.handOrder.map((id) => byId.get(id));
   }
 
   /**
@@ -932,11 +968,16 @@ export class GameView {
         else text.appendChild(h('span', { class: 'hint' }, ' — click a highlighted card to play it'));
         break;
       }
-      case 'mulligan':
-        text.textContent = `${d.prompt} (hand of ${d.hand_size})`;
+      case 'mulligan': {
+        // keep-first seats see the new seven and learn how many go to the bottom if they keep (bottom_on_keep)
+        const n = d.bottom_on_keep || 0;
+        text.textContent = n
+          ? `${d.prompt} If you keep, you put ${n} of these ${d.hand_size} cards on the bottom of your library.`
+          : `${d.prompt} (hand of ${d.hand_size})`;
         btn('Mulligan', () => this.answer({ choice: 'mulligan' }));
-        btn('Keep', () => this.answer({ choice: 'keep' }), 'primary');
+        btn(n ? `Keep ${d.hand_size - n}` : 'Keep', () => this.answer({ choice: 'keep' }), 'primary');
         break;
+      }
       case 'declare_attackers': {
         const n = this.local.attackers.size;
         text.appendChild(h('span', { class: 'hint' }, ' — click creatures to toggle attackers'));

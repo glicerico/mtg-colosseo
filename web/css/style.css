@@ -208,6 +208,10 @@ table.games td.actions .btn { margin-left: 4px; }
 .hand-row.bottom .card { --card-w: var(--hw); margin-left: calc(var(--card-w) * -.18); transition: transform .12s; }
 .hand-row.bottom .card:first-child { margin-left: 0; }
 .hand-row.bottom .card:hover { transform: translateY(-16px); z-index: 5; }
+/* a card that just arrived in hand (a draw), at the right end: lifted and outlined for a moment */
+.hand-row.bottom .card.new-in-hand { transform: translateY(-12px); }
+.card.new-in-hand > .card-img, .card.new-in-hand > .card-frame { outline: 3px solid var(--gold); outline-offset: 2px; animation: arrived .9s ease-out; }
+@keyframes arrived { from { outline-color: #fff; outline-offset: 8px; } }
 .hand-row.top .card, .hand-row.backs .card { --card-w: calc(46px * var(--ui)); }
 .hand-row.top .card { margin-left: calc(-14px * var(--ui)); }
 .hand-row.top .card:first-child { margin-left: 0; }

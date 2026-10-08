@@ -22,9 +22,100 @@ export function setCardScale(v) {
 const failedImages = new Set();
 
 export function imageUrl(card, version = 'normal') {
-  if (!settings.images || !card || card.hidden || card.token || !card.set || !card.number) return null;
+  if (!settings.images || !card || card.hidden) return null;
+  // a token that copies a card has the card's set and number; other tokens are found by name (tokenImageUrl)
+  if (card.token && !card.number) return tokenImageUrl(card, version);
+  if (!card.set || !card.number) return null;
   const url = `https://api.scryfall.com/cards/${card.set.toLowerCase()}/${encodeURIComponent(card.number)}?format=image&version=${version}`;
   return failedImages.has(url) ? null : url;
+}
+
+// --- token images ---------------------------------------------------------------------------------
+// Tokens have no collector number: the server names each one (token_image: the set XMage chose, the token's name
+// as Scryfall names tokens, its variant). Each kind of token is looked up once on Scryfall, in that set's tokens
+// ("t" + set code) and then in any set, preferring the token with the same power/toughness, colours and keywords.
+// Lookups are queued (at most ~6 a second, as Scryfall asks) and remembered in this browser.
+const TOKENS_KEY = 'colosseo.tokenImages.v1';
+const tokenImages = new Map(Object.entries((() => { try { return JSON.parse(localStorage.getItem(TOKENS_KEY)) || {}; } catch { return {}; } })()));
+const tokenQueue = [];
+const tokenQueued = new Set();
+const tokenListeners = new Set();
+let tokenBusy = false;
+
+/** Calls fn whenever a token image has been found (the board then re-renders its tokens). */
+export function onTokenImage(fn) {
+  tokenListeners.add(fn);
+  return () => tokenListeners.delete(fn);
+}
+
+const tokenKey = (t) => `${(t.set || '').toUpperCase()}|${t.name}|${t.variant || 0}`;
+
+function tokenImageUrl(card, version) {
+  const t = card.token_image;
+  if (!t || !t.name) return null;
+  const key = tokenKey(t);
+  const hit = tokenImages.get(key);
+  if (hit) return hit.none ? null : (version === 'large' && hit.large) || hit.normal;
+  if (!tokenQueued.has(key)) {
+    tokenQueued.add(key);
+    tokenQueue.push({ key, t, card });
+    pumpTokens();
+  }
+  return null;
+}
+
+async function pumpTokens() {
+  if (tokenBusy) return;
+  tokenBusy = true;
+  while (tokenQueue.length) {
+    const job = tokenQueue.shift();
+    try {
+      const found = await findToken(job.t, job.card);
+      tokenImages.set(job.key, found || { none: true });
+      try { localStorage.setItem(TOKENS_KEY, JSON.stringify(Object.fromEntries(tokenImages))); } catch { /* full */ }
+      if (found) tokenListeners.forEach((fn) => fn());
+    } catch {
+      tokenQueued.delete(job.key); // network trouble: ask again next time the token is drawn
+    }
+  }
+  tokenBusy = false;
+}
+
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function findToken(t, card) {
+  const search = (extra) => `https://api.scryfall.com/cards/search?q=${encodeURIComponent(`t:token !"${t.name}"${extra}`)}&unique=art&order=released&dir=desc`;
+  const tries = t.set ? [search(` set:t${t.set.toLowerCase()}`), search('')] : [search('')];
+  for (const url of tries) {
+    await pause(150);
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (res.status === 404) continue; // no such token there
+    if (!res.ok) throw new Error(`Scryfall ${res.status}`);
+    const best = bestToken((await res.json()).data || [], t, card);
+    if (best) return best;
+  }
+  return null;
+}
+
+/** The candidate most like this token: same printed power/toughness, colours and keywords; else the first. */
+function bestToken(list, t, card) {
+  const printed = (card.explain && card.explain.printed) || [card.power, card.toughness];
+  const colors = (card.colors || '').toUpperCase().split('').sort().join('');
+  const keywords = (card.keywords || []).map((k) => k.toLowerCase());
+  let best = null;
+  let bestScore = -1;
+  for (const c of list) {
+    const face = (c.card_faces || []).find((f) => f.name === t.name) || c;
+    const uris = face.image_uris || c.image_uris;
+    if (!uris) continue;
+    let score = 0;
+    if (printed[0] !== undefined && printed[0] !== null && String(face.power) === String(printed[0]) && String(face.toughness) === String(printed[1])) score += 4;
+    if ((face.colors || c.colors || []).slice().sort().join('') === colors) score += 2;
+    const text = (face.oracle_text || '').toLowerCase();
+    score += keywords.filter((k) => text.includes(k)).length;
+    if (score > bestScore) { best = { normal: uris.normal, large: uris.large || uris.normal, scryfall: `${c.set}/${c.collector_number}` }; bestScore = score; }
+  }
+  return best;
 }
 
 function frameColor(card) {
@@ -54,7 +145,7 @@ function textFrame(card) {
 function signature(card, extra) {
   return JSON.stringify([card.name, card.set, card.number, card.hidden, card.power, card.toughness, card.tapped,
     card.damage, card.counters, card.attacking, card.blocking, card.summoning_sick, card.face_down, card.token,
-    card.rules && card.rules.length, card.explain, extra, settings.images]);
+    card.rules && card.rules.length, card.explain, extra, settings.images, card.token && imageUrl(card)]);
 }
 
 /**
