@@ -6,9 +6,11 @@ seat-0 messages recorded from an engine game (fixtures/ui_board.json; see its "_
     pip install playwright pytest && playwright install chromium
     python -m pytest python/tests -m ui
 """
+import base64
 import copy
 import json
 import mimetypes
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -30,17 +32,23 @@ def browser():
         b.close()
 
 
-def open_board(browser, decision, size=(1920, 1080), card_scale=None, mutate=None):
-    """Opens seat 0 of the fixture game showing one recorded decision; returns the page."""
+def open_board(browser, decision, size=(1920, 1080), card_scale=None, mutate=None, mutate_msg=None, then=(), images=False,
+               routes=None):
+    """Opens seat 0 of the fixture game showing one recorded decision; returns the page. then: functions of the
+    decision's state returning messages sent right after it; routes: {url pattern: handler} for other hosts. The
+    page's messages to the server are in page.sent."""
     hello = copy.deepcopy(FIXTURE["hello"])
     msg = copy.deepcopy(FIXTURE["decisions"][str(decision)])
     if mutate:
         mutate(msg["state"])
+    if mutate_msg:
+        mutate_msg(msg)
     gid = hello["game_id"]
     page = browser.new_page(viewport={"width": size[0], "height": size[1]})
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.errors = errors
+    page.sent = []
 
     def serve(route):
         path = route.request.url[len(BASE):].split("?")[0].split("#")[0]
@@ -56,13 +64,18 @@ def open_board(browser, decision, size=(1920, 1080), card_scale=None, mutate=Non
     def ws(route):
         route.send(json.dumps(hello))
         route.send(json.dumps(msg))
+        for f in then:
+            route.send(json.dumps(f(msg["state"])))
+        route.on_message(lambda text: page.sent.append(json.loads(text)))
 
     page.route(f"{BASE}/**", serve)
+    for pattern, handler in (routes or {}).items():
+        page.route(pattern, handler)
     page.route_web_socket("**/ws/game/**", ws)
     page.goto(BASE + "/")
-    page.evaluate("s => { localStorage.setItem('colosseo.images', 'off');"
+    page.evaluate("([s, img]) => { localStorage.setItem('colosseo.images', img ? 'on' : 'off');"
                   " if (s) localStorage.setItem('colosseo.cardScale', s); else localStorage.removeItem('colosseo.cardScale'); }",
-                  str(card_scale) if card_scale else None)
+                  [str(card_scale) if card_scale else None, images])
     page.goto(f"{BASE}/#/game/{gid}/seat/0")
     page.reload()  # a hash change keeps the document: reload so the settings above are read
     page.wait_for_selector(".prompt-bar.active")
@@ -301,3 +314,136 @@ def test_crowded_rows_shrink_instead_of_wrapping(browser):
     assert row.evaluate("r => r.scrollWidth <= r.clientWidth + 1")
     tops = row.evaluate("r => new Set([...r.querySelectorAll(':scope > .card')].map(c => c.offsetTop)).size")
     assert tops == 1  # one line
+
+
+# --- the hand, the London mulligan, token pictures -----------------------------------------------------------------
+
+def seat0(state):
+    return next(p for p in state["players"] if p["seat"] == 0)
+
+
+def hand_names(page):
+    return page.locator(".hand-row.bottom .card .cf-name").all_inner_texts()
+
+
+def drawn(state):
+    """The next state, with one card more in hand (a draw); the engine lists it first."""
+    st = copy.deepcopy(state)
+    me = seat0(st)
+    me["hand"].insert(0, {**copy.deepcopy(me["hand"][0]), "id": "00000000-0000-4000-8000-0000000d0a00", "name": "Drawn Card",
+                          "types": ["Sorcery"], "mana_value": 0})
+    me["hand_count"] += 1
+    return {"type": "state", "state": st}
+
+
+def test_a_new_card_in_hand_goes_to_the_right_end_highlighted_for_a_moment(browser):
+    page = open_board(browser, 8, then=[drawn])
+    page.wait_for_function("() => document.querySelectorAll('.hand-row.bottom .card').length === 7")
+    names = hand_names(page)
+    # mana value 0 would sort it first: it stays where it arrived, at the right end; the others keep their places
+    assert names[-1] == "Drawn Card"
+    assert names[:-1] == ["Unsummon", "Adamant Will", "Into the Roil", "Erudite Wizard", "Inspiring Overseer", "Clinquant Skymage"]
+    new = page.locator('.hand-row.bottom .card:has(.cf-name:text-is("Drawn Card"))')
+    assert "new-in-hand" in new.get_attribute("class")
+    page.wait_for_timeout(2800)
+    assert "new-in-hand" not in new.get_attribute("class")
+    assert hand_names(page)[-1] == "Drawn Card"
+    assert page.errors == []
+
+
+def test_the_hand_is_sorted_until_the_game_starts(browser):
+    def mulligans(state):  # no step yet: the opening hand, a new one at each mulligan, in any order from the engine
+        state["step"] = state["phase"] = None
+        seat0(state)["hand"].reverse()
+
+    def another_hand(state):
+        st = copy.deepcopy(state)
+        hand = seat0(st)["hand"]
+        for i, c in enumerate(hand):
+            c["id"] = f"00000000-0000-4000-8000-0000000c0d{i:02d}"
+        hand.reverse()
+        return {"type": "state", "state": st}
+
+    page = open_board(browser, 8, mutate=mulligans, then=[another_hand])
+    page.wait_for_timeout(200)
+    names = hand_names(page)
+    values = {"Unsummon": 1, "Adamant Will": 2, "Into the Roil": 2, "Erudite Wizard": 3, "Inspiring Overseer": 3, "Clinquant Skymage": 4}
+    assert [values[n] for n in names] == sorted(values[n] for n in names)
+    assert page.locator(".hand-row.bottom .card.new-in-hand").count() == 0  # a new hand, not new cards
+
+
+def keep_first_mulligan(bottom_on_keep):
+    def mutate(msg):
+        msg.update(kind="mulligan", prompt="Mulligan down to 5 cards?", hand_size=7,
+                   options=[{"id": "keep", "label": "Keep"}, {"id": "mulligan", "label": "Mulligan"}],
+                   default={"choice": "keep"})
+        if bottom_on_keep is not None:
+            msg["bottom_on_keep"] = bottom_on_keep
+        msg["state"]["step"] = msg["state"]["phase"] = None
+    return mutate
+
+
+def test_the_london_mulligan_says_how_many_cards_you_keep(browser):
+    page = open_board(browser, 8, mutate_msg=keep_first_mulligan(2))
+    buttons = page.locator(".prompt-bar .prompt-buttons .btn").all_inner_texts()
+    assert buttons == ["Mulligan", "Keep 5"]
+    assert "If you keep, you put 2 of these 7 cards on the bottom of your library." in page.locator(".prompt-text").inner_text()
+    page.locator(".prompt-bar .btn.primary").click()
+    assert [m for m in page.sent if m.get("type") == "action"][-1]["choice"] == "keep"
+    # a decision without bottom_on_keep (agents' order, or the first hand) is a plain keep
+    page2 = open_board(browser, 8, mutate_msg=keep_first_mulligan(None))
+    assert page2.locator(".prompt-bar .prompt-buttons .btn").all_inner_texts() == ["Mulligan", "Keep"]
+
+
+PIXEL = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+
+
+def scryfall(searches):
+    """A stand-in for Scryfall: token searches answered from a table, every picture a 1-pixel PNG."""
+    tokens = {
+        "Treasure": [{"name": "Treasure", "set": "tfra", "collector_number": "15", "colors": [], "power": None,
+                      "image_uris": {"normal": "https://img.test/tfra-15.jpg", "large": "https://img.test/tfra-15-l.jpg"}}],
+        "Goblin": [{"name": "Goblin", "set": "tfdn", "collector_number": "8", "colors": ["R"], "power": "2", "toughness": "2",
+                    "image_uris": {"normal": "https://img.test/goblin-22.jpg"}},
+                   {"name": "Goblin", "set": "tfdn", "collector_number": "9", "colors": ["R"], "power": "1", "toughness": "1",
+                    "image_uris": {"normal": "https://img.test/goblin-11.jpg"}}],
+    }
+
+    def search(route):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(route.request.url).query)["q"][0]
+        searches.append(q)
+        name = q.split('!"')[1].split('"')[0]
+        if name in tokens and ("set:t" not in q or tokens[name][0]["set"] in q):
+            return route.fulfill(json={"object": "list", "data": tokens[name]})
+        return route.fulfill(status=404, json={"object": "error"})
+
+    return {"https://api.scryfall.com/cards/search**": search,
+            "https://api.scryfall.com/cards/*/*": lambda r: r.fulfill(body=PIXEL, content_type="image/png"),
+            "https://img.test/**": lambda r: r.fulfill(body=PIXEL, content_type="image/png")}
+
+
+def token_src(page, side, name):
+    sel = f'.side.{side} .zone .card:has(.cf-name:text-is("{name}")) img.card-img'
+    page.wait_for_selector(sel, timeout=10000)
+    return page.locator(sel).first.get_attribute("src")
+
+
+def test_tokens_get_their_picture_from_scryfall(browser):
+    searches = []
+
+    def treasure(state):
+        opp = next(p for p in state["players"] if p["seat"] == 1)
+        next(c for c in opp["battlefield"] if c["name"] == "Treasure Token")["token_image"] = {"set": "FRA", "name": "Treasure"}
+
+    page = open_board(browser, 68, mutate=treasure, images=True, routes=scryfall(searches))
+    assert token_src(page, "top", "Treasure Token") == "https://img.test/tfra-15.jpg"
+    assert any('!"Treasure"' in q and "set:tfra" in q and "t:token" in q for q in searches)
+    # a creature token: of the set's Goblins, the one with the token's power/toughness
+    def goblins(state):
+        for c in next(p for p in state["players"] if p["seat"] == 1)["battlefield"]:
+            if c["name"] == "Goblin Token":
+                c["token_image"] = {"set": "FDN", "name": "Goblin"}
+
+    page2 = open_board(browser, 8, mutate=goblins, images=True, routes=scryfall(searches))
+    assert token_src(page2, "top", "Goblin Token") == "https://img.test/goblin-11.jpg"
+    assert page.errors == [] and page2.errors == []
