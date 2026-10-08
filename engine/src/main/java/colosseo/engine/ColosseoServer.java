@@ -423,7 +423,9 @@ public final class ColosseoServer {
                 error(ctx, 404, "no record for this game (created with \"record\": false?)");
                 return;
             }
-            ctx.contentType("application/x-ndjson");
+            // the record file is UTF-8; without a charset the response is encoded as ISO-8859-1 and every character
+            // outside it (the em dash of "Morbid — At the beginning ...") arrives as "?"
+            ctx.contentType("application/x-ndjson; charset=utf-8");
             ctx.result(String.join("\n", Records.read(file, seatIndex)) + "\n");
         });
 
