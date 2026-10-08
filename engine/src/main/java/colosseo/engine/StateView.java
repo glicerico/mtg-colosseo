@@ -7,6 +7,8 @@ import mage.abilities.Ability;
 import mage.abilities.Mode;
 import mage.cards.Card;
 import mage.cards.Cards;
+import mage.cards.repository.TokenInfo;
+import mage.cards.repository.TokenRepository;
 import mage.constants.CardType;
 import mage.constants.ManaType;
 import mage.constants.SubType;
@@ -176,12 +178,56 @@ public final class StateView {
                     if (x != null) {
                         c.add("explain", x);
                     }
+                    if (perm instanceof PermanentToken) {
+                        JsonObject image = tokenImage((PermanentToken) perm);
+                        if (image != null) {
+                            c.add("token_image", image);
+                        }
+                    }
                 }
                 battlefield.add(c);
             }
         }
         p.add("battlefield", battlefield);
         return p;
+    }
+
+    /**
+     * Which picture shows a token, for browser views (like {@code explain}): the entry of XMage's token database that
+     * the engine chose when it created the token, i.e. its set code ("FRA"), its name as Scryfall names tokens
+     * ("Treasure", not "Treasure Token") and its variant within that set (when the set has several tokens of that
+     * name). The browser finds the image on Scryfall from these. Null for a token that copies a card: its set and
+     * number show it. Only reads XMage's static token database.
+     */
+    static JsonObject tokenImage(PermanentToken token) {
+        if (token.getCardNumber() != null && !token.getCardNumber().isEmpty()) {
+            return null;
+        }
+        String set = token.getExpansionSetCode();
+        int variant = token.getImageNumber() == null ? 0 : token.getImageNumber();
+        String name = null;
+        try {
+            for (TokenInfo info : TokenRepository.instance.getByClassName(token.getToken().getClass().getName())) {
+                if (info.getSetCode().equals(set) && (variant == 0 || info.getImageNumber() == variant)) {
+                    name = info.getName();
+                    break;
+                }
+            }
+        } catch (RuntimeException e) {
+            // no database entry: the name below
+        }
+        if (name == null) {
+            name = token.getName().replaceFirst(" Token$", "");
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("name", name);
+        if (set != null && !set.isEmpty() && !TokenRepository.XMAGE_TOKENS_SET_CODE.equals(set)) {
+            o.addProperty("set", set);
+            if (variant > 0) {
+                o.addProperty("variant", variant);
+            }
+        }
+        return o;
     }
 
     public static JsonArray cards(Game game, Iterable<? extends Card> cards) {

@@ -279,3 +279,8 @@ boost. Attribution follows what each effect references (its affected objects, ta
 filter); the totals always add up, whatever the attribution finds. A source that is hidden from the viewer is
 named "a hidden card". Building `explain` only reads the game (it writes nothing, not even effect timestamps), so explained
 views never change how a game plays; `test_explanations_do_not_change_play` checks this.
+
+Tokens in the same views also carry `token_image`, which picture shows them: the entry of XMage's token database the
+engine chose for the token (its set code, its name as Scryfall names tokens, its variant when that set has several
+of the name), e.g. `{"set": "FRA", "name": "Heartwood"}`. A token that copies a card has none: its `set` and `number`
+are the card's. The web UI looks the picture up on Scryfall (that set's tokens first, then any set).
