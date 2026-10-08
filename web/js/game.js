@@ -38,7 +38,7 @@ const MIN_STEP_MS = 250;
 const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
 
 // what a log line about each kind of event says (XMage's wording)
-const LOG_WORDS = { cast: /\bcasts\b/, ability: /activat|ability/i, trigger: /\btriggers\b/, attack: /\battacks\b/,
+const LOG_WORDS = { cast: /\bcasts\b/, ability: /activat|ability/i, trigger: /\btriggers\b/, attack: /\battacks \S.* with \d+ creatures?$/,
   block: /\bblocked by\b|\bblocks\b/, damage: /\bdamage\b|\bloses \d+ life\b/, life: /\blife\b/, countered: /\bcounter/,
   move: /graveyard|battlefield|exile|hand|library|draws|creates|token|plays|sacrific/i };
 
@@ -1042,7 +1042,9 @@ export class GameView {
       if (ev.log_at === undefined || stepKey(ev) === 'to-stack') continue;
       const ids = [ev.id, ev.card_id, ev.source_id, ev.attacker, ev.blocker, ev.target, ev.source]
         .filter(Boolean).map((x) => `[${x.slice(0, 3)}]`);
-      const says = LOG_WORDS[ev.kind] || /./;
+      const words = LOG_WORDS[ev.kind] || /./;
+      // a trigger's line quotes its ability's text ("... attacks, that creature deals 1 damage ..."): only triggers match it
+      const says = { test: (t) => words.test(t) && (ev.kind === 'trigger' || !t.includes('Ability triggers')) };
       const near = (ok) => {
         let best = null;
         for (let i = ev.log_at - 3; i <= ev.log_at + 3; i++) {
