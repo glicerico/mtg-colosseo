@@ -60,9 +60,9 @@ public class AiMovesTest {
     public void seatViewsDropAiMoveLines() {
         for (String type : new String[]{"ai_move", "ai_replay", "ai_replay_divergence"}) {
             JsonObject line = Json.parse("{\"type\": \"" + type + "\", \"data\": {\"seat\": 1, \"state\": {}}}");
-            assertNull(Records.forSeat(line, 0, true));
-            assertNull(Records.forSeat(line, 1, true));
+            assertNull(Records.forSeat(line, 0));
+            assertNull(Records.forSeat(line, 1));
         }
-        assertTrue(Records.forSeat(Json.parse("{\"type\": \"result\", \"data\": {}}"), 0, true) != null);
+        assertTrue(Records.forSeat(Json.parse("{\"type\": \"result\", \"data\": {}}"), 0) != null);
     }
 }
