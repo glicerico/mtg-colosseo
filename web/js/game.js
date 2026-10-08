@@ -2,6 +2,7 @@
 import { wsUrl, getGame, seatToken, ownerToken, forgetToken } from './api.js';
 import { h, modal, toast, closeAllModals, manaSymbols, escapeRules } from './ui.js';
 import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE, onTokenImage } from './cards.js';
+import { Fx } from './fx.js';
 
 const STEPS = [
   ['UNTAP', 'Untap'], ['UPKEEP', 'Upkeep'], ['DRAW', 'Draw'], ['PRECOMBAT_MAIN', 'Main 1'],
@@ -22,6 +23,39 @@ const isCreature = (c) => (c.types || []).includes('Creature');
 const sortHand = (cards) => [...cards].sort((a, b) => (isLand(b) - isLand(a)) || ((a.mana_value || 0) - (b.mana_value || 0)));
 // how long a card that just arrived in hand stays highlighted (ms)
 const NEW_IN_HAND_MS = 2500;
+
+// What happens is shown step by step (design-opponent-turn.md): how long each kind of step stays at "Normal" (ms),
+// the paces a player can choose, and how much faster the player's own actions go (they know what they did).
+// Steps that pile up go faster, so that the board is never more than about LAG_MS behind the game.
+const STEP_MS = { cast: 1300, trigger: 1100, ability: 1100, attack: 1000, block: 1000, hit: 800, countered: 900,
+  move: 700, leave: 800, draw: 350 };
+const PACES = { slow: 1.6, normal: 1, fast: 0.5, off: 0 };
+const PACE_NAMES = { slow: 'Slow', normal: 'Normal', fast: 'Fast', off: 'Off' };
+const PACE_KEY = 'colosseo.pace';
+const OWN_K = 0.35;
+const LAG_MS = 5000;
+const MIN_STEP_MS = 250;
+const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
+
+/** Which step an event belongs to: events the engine reports one by one but that are one action go together. */
+function stepKey(ev) {
+  if (ev.kind === 'move' && ev.to === 'STACK') return 'to-stack'; // a card going to the stack: part of casting it
+  if (ev.kind === 'damage' || ev.kind === 'life') return 'hit';
+  if (ev.kind === 'move' && ev.from === 'BATTLEFIELD' && ['GRAVEYARD', 'EXILED'].includes(ev.to)) return 'leave';
+  if (ev.kind === 'move' && ev.from === 'LIBRARY' && ev.to === 'HAND') return 'draw';
+  return ev.kind;
+}
+
+/** Whether a waiting frame joins the step being built: the attackers of one declaration, combat damage, deaths... */
+function joins(batch, next) {
+  if (!next.event || next.decision || next.result) return false;
+  const last = batch[batch.length - 1].event;
+  if (!last) return false;
+  const a = stepKey(last);
+  const b = stepKey(next.event);
+  if (a === 'to-stack') return b === 'cast' || b === 'ability' || b === 'trigger';
+  return a === b && ['attack', 'block', 'hit', 'leave', 'draw'].includes(a);
+}
 
 // Card width limits (px); the size of lands and other permanents, and of the cards in hand, relative to creatures:
 // full size, and the smallest they shrink to before the creatures do.
@@ -82,6 +116,11 @@ export class GameView {
     this.groups = new Map(); // wrappers for token stacks and attachment groups, by key
     this.handOrder = null; // ids of the cards in this player's hand, left to right (null: no hand seen yet)
     this.newInHand = new Map(); // id -> time until which a card that just arrived in hand is highlighted
+    this.queue = []; // frames waiting to be shown: {state, event?, decision?, result?}, in the order they came
+    this.playing = false;
+    this.pace = PACES[localStorage.getItem(PACE_KEY)] !== undefined ? localStorage.getItem(PACE_KEY) : 'normal';
+    this.memberHost = new Map(); // id of a token shown in a stack -> id of the stack's card
+    this.logByI = new Map(); // log line index -> {entry, el}
     this.keyHandler = (e) => this.onKey(e);
     document.addEventListener('keydown', this.keyHandler);
     this.resizeHandler = () => this.layout();
@@ -100,6 +139,9 @@ export class GameView {
     for (const v of ['--card-w', '--ui', '--land-k', '--hand-k']) document.documentElement.style.removeProperty(v);
     clearInterval(this.pollTimer);
     clearTimeout(this.newInHandTimer);
+    clearTimeout(this.stepTimer);
+    clearTimeout(this.linkTimer);
+    if (this.fx) this.fx.clear();
     if (this.ws) this.ws.close();
     document.getElementById('conn-status').textContent = '';
   }
@@ -142,6 +184,7 @@ export class GameView {
     const board = h('div', { class: 'board' }, e.banner, e.topSide, e.middle, e.botSide, e.prompt);
     board.addEventListener('click', (ev) => this.onBoardClick(ev));
     this.board = board;
+    this.fx = new Fx(board);
     this.root.append(board, h('aside', { class: 'sidebar' }, e.header, e.log));
     this.renderHeader();
   }
@@ -222,7 +265,12 @@ export class GameView {
           this.reveal = !!msg.reveal;
         }
         if (msg.state) this.state = msg.state;
+        this.queue = [];
+        this.playing = false;
+        clearTimeout(this.stepTimer);
+        this.fx.clear();
         this.log = [];
+        this.logByI.clear();
         this.el.log.innerHTML = '';
         (msg.log || []).forEach((e) => this.addLog(e));
         this.renderHeader();
@@ -230,16 +278,14 @@ export class GameView {
         this.render();
         break;
       case 'state':
-        this.state = msg.state;
-        this.render();
+        this.enqueue({ state: msg.state });
+        break;
+      case 'event': // browser views only: one engine event and the board right after it
+        this.enqueue({ state: msg.state, event: msg.event });
         break;
       case 'decision':
         if (this.sent && this.sent.decision_id === msg.decision_id) return; // already answered
-        this.decision = msg;
-        this.state = msg.state || this.state;
-        this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
-        this.render();
-        this.autoOpen();
+        this.enqueue({ state: msg.state, decision: msg });
         break;
       case 'decision_pending':
         this.waiting = msg;
@@ -273,11 +319,7 @@ export class GameView {
         toast(msg.message, 'error', 6000);
         break;
       case 'game_over':
-        this.result = msg.result;
-        if (msg.state) this.state = msg.state;
-        this.decision = null;
-        this.render();
-        this.showResult();
+        this.enqueue({ state: msg.state, result: msg.result });
         break;
       default:
         break;
@@ -292,8 +334,29 @@ export class GameView {
       this.el.log.appendChild(h('div', { class: 'log-turn' }, `Turn ${entry.turn}`));
     }
     this.log.push(entry);
-    this.el.log.appendChild(h('div', { class: 'log-line' }, entry.text));
+    const line = h('div', { class: 'log-line', dataset: { i: entry.i } }, entry.text);
+    // hovering a line rings the objects it names on the board ("Cadet [dc9]": an id's first characters)
+    line.addEventListener('mouseenter', () => this.ringNamed(entry.text, true));
+    line.addEventListener('mouseleave', () => this.ringNamed(entry.text, false));
+    this.logByI.set(entry.i, { entry, el: line });
+    this.el.log.appendChild(line);
     this.scrollLog();
+  }
+
+  ringNamed(text, on) {
+    for (const m of text.matchAll(/\[([0-9a-f]{3})\]/g)) {
+      for (const el of this.board.querySelectorAll(`.card[data-id^="${m[1]}"]`)) el.classList.toggle('log-ring', on);
+    }
+  }
+
+  /** Scrolls the log to a line and flashes it (a step's "log" link). */
+  showLogLine(i) {
+    const l = this.logByI.get(i);
+    if (!l) return;
+    l.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    l.el.classList.remove('log-flash');
+    void l.el.offsetWidth;
+    l.el.classList.add('log-flash');
   }
 
   addAction(msg) {
@@ -354,6 +417,17 @@ export class GameView {
     size.addEventListener('dblclick', () => { size.value = 1; size.dispatchEvent(new Event('input')); });
     controls.push(h('label', { class: 'toggle size-control', title: 'Card size (100% fits the board to the window; double-click to reset)' },
       'Cards ', size, pct));
+    const pace = h('select', { class: 'pace-select', 'aria-label': 'Pace of the actions shown step by step' },
+      Object.keys(PACES).map((k) => h('option', { value: k, selected: k === this.pace }, PACE_NAMES[k])));
+    pace.addEventListener('change', () => {
+      this.pace = pace.value;
+      localStorage.setItem(PACE_KEY, this.pace);
+      if (this.pace === 'off') this.skip();
+    });
+    controls.push(h('label', { class: 'toggle pace-control', title: 'Each action (a spell, an attack, damage, a card moving) is shown step by step at this pace; Off: the board just updates' },
+      'Actions ', pace));
+    this.el.skip = h('button', { class: 'btn small skip-btn hidden', title: 'Show the board as it is now (Esc)', onclick: () => this.skip() }, 'Skip ⏭');
+    controls.push(this.el.skip);
     e.header.replaceChildren(
       h('div', { class: 'side-title' }, h('a', { href: '#/' }, '←'), ' ', title),
       h('div', { class: 'side-sub mono' }, `game ${this.gameId}`, this.isPlayer ? ` · seat ${this.seat}` : ' · spectator'),
@@ -451,6 +525,7 @@ export class GameView {
       return;
     }
     this.el.center.textContent = '';
+    this.memberHost.clear();
     this.computeInteraction();
     const [top, bottom] = this.players();
     this.renderPlayer(top, 'top');
@@ -597,11 +672,11 @@ export class GameView {
       h('div', { class: 'pinfo' },
         h('div', { class: 'pname' }, p.name, active ? h('span', { class: 'turn-dot', title: 'active player' }) : null),
         h('div', { class: 'pcounts' },
-          h('span', { title: 'library' }, `📚 ${p.library_count}`),
-          h('span', { title: 'hand' }, `✋ ${p.hand_count}`),
-          h('button', { class: 'linkish', onclick: (ev) => { ev.stopPropagation(); this.showZone(`${p.name}'s graveyard`, p.graveyard || []); } },
+          h('span', { class: 'z-library', title: 'library' }, `📚 ${p.library_count}`),
+          h('span', { class: 'z-hand', title: 'hand' }, `✋ ${p.hand_count}`),
+          h('button', { class: 'linkish z-graveyard', onclick: (ev) => { ev.stopPropagation(); this.showZone(`${p.name}'s graveyard`, p.graveyard || []); } },
             `⚰ ${(p.graveyard || []).length}`),
-          this.exileOf(p).length ? h('button', { class: 'linkish', onclick: (ev) => { ev.stopPropagation(); this.showZone(`Exiled (${p.name})`, this.exileOf(p)); } },
+          this.exileOf(p).length ? h('button', { class: 'linkish z-exile', onclick: (ev) => { ev.stopPropagation(); this.showZone(`Exiled (${p.name})`, this.exileOf(p)); } },
             `☄ ${this.exileOf(p).length}`) : null),
         pool.length ? h('div', { class: 'pool' }, 'pool ', pool.map(([k, n]) => manaSymbols(`{${k}}`.repeat(n)))) : null,
         counters.length ? h('div', { class: 'pcounters' }, counters.map(([k, n]) => `${k}: ${n}`).join(', ')) : null));
@@ -689,7 +764,7 @@ export class GameView {
         const x = this.extras.get(c.id) || {};
         const k = JSON.stringify([c.name, c.power, c.toughness, c.tapped, c.damage, c.counters, c.summoning_sick,
           c.attacking, c.blocking, c.explain, x.classes, x.badges, this.clickable.has(c.id)]);
-        if (stacks.has(k)) { stacks.get(k).members.push(c); continue; }
+        if (stacks.has(k)) { stacks.get(k).members.push(c); this.memberHost.set(c.id, stacks.get(k).host.id); continue; }
         const item = { key: null, host: c, members: [c], owner };
         stacks.set(k, item);
         out.push(item);
@@ -737,6 +812,315 @@ export class GameView {
     const current = Array.from(container.children);
     els.forEach((el, i) => { if (current[i] !== el) container.insertBefore(el, container.children[i] || null); });
     while (container.children.length > els.length) container.lastChild.remove();
+  }
+
+  // --- what happens, step by step ---------------------------------------------------------------------
+
+  /**
+   * Every state, event, decision and result goes through here, in the order it came. With nothing being shown
+   * and nothing to show (a plain state, a decision), or at pace Off, it goes straight onto the board; otherwise it
+   * waits for the steps before it. A step shows the engine's own view right after its event, with what happened
+   * drawn over it for a moment; the board always ends on the latest state, and Skip goes there at once.
+   */
+  enqueue(frame) {
+    if (this.pace === 'off' || (!this.playing && !this.queue.length && !frame.event)) {
+      this.applyBatch([frame], false);
+      return;
+    }
+    this.queue.push(frame);
+    if (!this.playing) {
+      // events of one engine action arrive together: let them in before building the step
+      this.playing = true;
+      this.stepTimer = setTimeout(() => this.playNext(), 40);
+    }
+    this.renderSkip();
+  }
+
+  playNext() {
+    clearTimeout(this.stepTimer);
+    if (!this.queue.length) {
+      this.playing = false;
+      this.renderSkip();
+      return;
+    }
+    this.playing = true;
+    const batch = [this.queue.shift()];
+    while (this.queue.length && joins(batch, this.queue[0])) batch.push(this.queue.shift());
+    const ms = this.applyBatch(batch, true);
+    this.renderSkip();
+    this.stepTimer = setTimeout(() => this.playNext(), ms);
+  }
+
+  /** Shows the board as it is now: every waiting frame applied at once, without its visual step. */
+  skip() {
+    clearTimeout(this.stepTimer);
+    const rest = this.queue.splice(0);
+    this.fx.clear();
+    this.markLog([]);
+    this.playing = false;
+    if (rest.length) this.applyBatch(rest, false);
+    this.renderSkip();
+  }
+
+  renderSkip() {
+    const b = this.el.skip;
+    if (!b) return;
+    const n = this.queue.filter((f) => f.event && stepKey(f.event) !== 'to-stack').length;
+    b.classList.toggle('hidden', !this.playing && !this.queue.length);
+    b.textContent = n ? `Skip ⏭ ${n}` : 'Skip ⏭';
+  }
+
+  /** Applies frames (their states, a decision, the result) and renders; returns how long the step stays (ms). */
+  applyBatch(batch, show) {
+    const events = batch.filter((f) => f.event).map((f) => f.event);
+    const before = show && events.length ? this.boxesOf(events) : null;
+    const prev = this.state;
+    let decided = false;
+    let ended = false;
+    for (const f of batch) {
+      if (f.state) this.state = f.state;
+      if (f.decision && !(this.sent && this.sent.decision_id === f.decision.decision_id)) {
+        this.decision = f.decision;
+        this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
+        decided = true;
+      }
+      if (f.result) {
+        this.result = f.result;
+        this.decision = null;
+        ended = true;
+      }
+    }
+    if (show) this.fx.clear();
+    this.render();
+    if (decided) this.autoOpen();
+    if (ended) this.showResult();
+    if (!show || !events.length || !prev) return 0;
+    return this.showStep(events, prev, before);
+  }
+
+  /** How much faster steps go when they pile up, or when a decision of this player waits behind them. */
+  catchUp() {
+    const waiting = this.queue.filter((f) => f.event).reduce((ms, f) => ms + (STEP_MS[stepKey(f.event)] || 0) * PACES[this.pace], 0);
+    const k = waiting > LAG_MS ? LAG_MS / waiting : 1;
+    return this.queue.some((f) => f.decision || f.result) ? k * 0.75 : k;
+  }
+
+  /** Draws one step over the board (rendered at the step's state) and links it to its log lines; returns its length. */
+  showStep(events, prev, before) {
+    const st = this.state;
+    const you = st.you;
+    const shown = events.filter((e) => stepKey(e) !== 'to-stack');
+    const ev = shown[0] || events[0];
+    const key = stepKey(ev);
+    const actor = ev.player || ev.owner;
+    let ms = (STEP_MS[key] || STEP_MS.move) * PACES[this.pace] * this.catchUp() * (actor && actor === you ? OWN_K : 1);
+    if (key === 'to-stack') ms = 0;
+    if (!ms) return 0;
+    ms = Math.max(MIN_STEP_MS, ms);
+    const name = (id) => this.nameIn(id, st) || this.nameIn(id, prev) || 'a card';
+    const pname = (id) => (((st.players || []).find((p) => p.id === id) || {}).name) || '';
+    const box = (id) => this.fx.rect(this.elementOf(id));
+    const list = (ids) => ids.map(name).join(', ');
+    let text = '';
+    switch (key) {
+      case 'cast': {
+        const so = (st.stack || []).find((x) => x.id === ev.id) || (st.stack || []).find((x) => x.card_id === ev.card_id);
+        const card = so ? { ...so, hidden: false } : this.findCard(ev.card_id, st) || { name: name(ev.id) };
+        const targets = ev.targets || [];
+        text = `${pname(ev.player)} casts ${card.name}` + (targets.length ? ` → ${list(targets)}` : '');
+        const from = this.fx.spotlight(this.fxCard(card), `${pname(ev.player)} casts`, targets.length ? `→ ${list(targets)}` : null, ms,
+          this.fx.rect(this.el.stack));
+        for (const t of targets) this.fx.arrow(from, box(t), 'target', ms);
+        for (const t of targets) this.fx.mark(this.elementOf(t), 'fx-targeted', ms);
+        break;
+      }
+      case 'trigger':
+      case 'ability': {
+        const so = (st.stack || []).find((x) => x.id === ev.id) || (st.stack || []).find((x) => x.source_id === ev.source_id) || {};
+        const src = this.findCard(ev.source_id, st) || this.findCard(ev.source_id, prev)
+          || { name: so.source_name || name(ev.source_id), set: so.set, number: so.number };
+        const targets = ev.targets || [];
+        const title = key === 'trigger' ? `${src.name} triggers` : `${pname(ev.player)} activates ${src.name}`;
+        text = title + (targets.length ? ` → ${list(targets)}` : '');
+        const rule = (so.rules || [])[0] || '';
+        const at = this.fx.spotlight(this.fxCard(src), title, rule.length > 150 ? `${rule.slice(0, 147)}…` : rule, ms,
+          this.fx.rect(this.el.stack));
+        const srcEl = this.elementOf(ev.source_id);
+        this.fx.mark(srcEl, 'fx-source', ms);
+        this.fx.arrow(this.fx.rect(srcEl), at, 'source', ms);
+        for (const t of targets) this.fx.arrow(at, box(t), 'target', ms);
+        break;
+      }
+      case 'attack': {
+        for (const e of shown) this.fx.arrow(box(e.attacker), box(e.defender), 'attack', ms);
+        text = `${pname(ev.player)} attacks with ${list(shown.map((e) => e.attacker))}`;
+        break;
+      }
+      case 'block': {
+        for (const e of shown) this.fx.arrow(box(e.blocker), box(e.attacker), 'block', ms);
+        text = `${pname(ev.player)} blocks: ${shown.map((e) => `${name(e.blocker)} → ${name(e.attacker)}`).join(', ')}`;
+        break;
+      }
+      case 'hit': {
+        const damaged = new Set();
+        for (const e of shown.filter((x) => x.kind === 'damage')) {
+          damaged.add(e.target);
+          this.fx.float(box(e.target), `−${e.amount}`, 'damage', ms);
+          this.fx.mark(this.elementOf(e.target), 'fx-hit', ms);
+          if (!e.combat) this.fx.arrow(box(e.source), box(e.target), 'damage', ms);
+        }
+        for (const e of shown.filter((x) => x.kind === 'life' && !damaged.has(x.player))) {
+          this.fx.float(box(e.player), e.amount > 0 ? `+${e.amount}` : `−${-e.amount}`, e.amount > 0 ? 'gain' : 'damage', ms);
+        }
+        const dmg = shown.filter((x) => x.kind === 'damage');
+        const life = shown.filter((x) => x.kind === 'life');
+        if (dmg.length && dmg.every((x) => x.combat)) text = `Combat damage: ${dmg.map((x) => `${name(x.source)} → ${name(x.target)} ${x.amount}`).join(', ')}`;
+        else if (dmg.length) text = dmg.map((x) => `${name(x.source)} deals ${x.amount} damage to ${name(x.target)}`).join(', ');
+        else text = life.map((x) => `${pname(x.player)} ${x.amount > 0 ? 'gains' : 'loses'} ${Math.abs(x.amount)} life`).join(', ');
+        break;
+      }
+      case 'countered':
+        text = `${name(ev.id)} is countered`;
+        break;
+      default: // moves: leave, draw, move
+        text = this.showMoves(shown, prev, before, ms, name, pname);
+    }
+    this.fx.caption(text, [], (i) => this.showLogLine(i), ms);
+    // log lines arrive just before or after their event: link them once they are in
+    clearTimeout(this.linkTimer);
+    this.linkTimer = setTimeout(() => {
+      const lines = this.logLinesOf(events);
+      this.markLog(lines);
+      const cap = this.fx.layer.querySelector('.fx-caption');
+      if (cap) for (const i of lines) cap.appendChild(h('button', { class: 'fx-log-link', title: 'Show this line in the log', onclick: (e) => { e.stopPropagation(); this.showLogLine(i); } }, `log ${i}`));
+    }, 80);
+    return ms;
+  }
+
+  /** Cards moving between zones: each flies from where it was to where it goes. Returns the caption. */
+  showMoves(moves, prev, before, ms, name, pname) {
+    const texts = [];
+    for (const e of moves) {
+      const owner = e.owner;
+      const card = (e.id && (this.findCard(e.id, this.state) || this.findCard(e.id, prev))) || null;
+      const from = (e.id && before && before.get(e.id)) || this.fx.rect(this.anchorOf(e.from, owner));
+      const toEl = e.id ? this.elementOf(e.id) : null;
+      const to = (toEl && e.to !== 'GRAVEYARD' && e.to !== 'EXILED' && e.to !== 'LIBRARY' && this.fx.rect(toEl)) || this.fx.rect(this.anchorOf(e.to, owner));
+      const what = card && !e.hidden ? card.name : null;
+      if (e.from === 'OUTSIDE' || (e.token && e.to === 'BATTLEFIELD' && e.from !== 'STACK')) {
+        this.fx.mark(toEl, 'fx-pop', ms);
+        texts.push(`${what || 'A token'} is created`);
+        continue;
+      }
+      this.fx.ghost(card && !e.hidden ? this.fxCard(card) : cardBack(), from, to, ms);
+      if (e.to === 'BATTLEFIELD' && toEl) this.fx.mark(toEl, 'fx-pop', ms);
+      if (e.from === 'LIBRARY' && e.to === 'HAND') texts.push(`${pname(owner)} draws ${what || 'a card'}`);
+      else if (e.from === 'HAND' && e.to === 'BATTLEFIELD') texts.push(`${pname(owner)} plays ${what || 'a card'}`);
+      else if (e.from === 'STACK' && e.to === 'BATTLEFIELD') texts.push(`${what} enters the battlefield`);
+      else if (e.from === 'STACK' && e.to === 'GRAVEYARD') texts.push(`${what} resolves → graveyard`);
+      else if (e.from === 'BATTLEFIELD' && e.to === 'GRAVEYARD') texts.push(`${what} → graveyard`);
+      else texts.push(`${what || 'A card'} → ${ZONE_NAMES[e.to] || (e.to || '').toLowerCase()}`);
+    }
+    const draws = texts.filter((t) => / draws a card$/.test(t));
+    if (draws.length > 1) return `${draws[0].replace(/ draws a card$/, '')} draws ${draws.length} cards`;
+    return texts.join(' · ');
+  }
+
+  /** The log lines a step's events name: XMage writes them just before or after the event (log_at). */
+  logLinesOf(events) {
+    const out = new Set();
+    for (const ev of events) {
+      if (ev.log_at === undefined || stepKey(ev) === 'to-stack') continue;
+      const ids = [ev.id, ev.card_id, ev.source_id, ev.attacker, ev.blocker, ev.target, ev.source]
+        .filter(Boolean).map((x) => `[${x.slice(0, 3)}]`);
+      let best = null;
+      if (ev.kind !== 'attack') {
+        for (let i = ev.log_at - 3; i <= ev.log_at + 3; i++) {
+          const l = this.logByI.get(i);
+          if (l && ids.some((x) => l.entry.text.includes(x)) && (best === null || Math.abs(i - ev.log_at) < Math.abs(best - ev.log_at))) best = i;
+        }
+      }
+      // XMage writes life, damage and triggers just before their event, the rest just after
+      const order = ['life', 'damage', 'trigger'].includes(ev.kind) ? [ev.log_at - 1, ev.log_at] : [ev.log_at, ev.log_at - 1];
+      if (best === null) best = order.find((i) => this.logByI.has(i)) ?? null;
+      if (best !== null) out.add(best);
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+
+  /** Highlights the log lines of the step being shown (and scrolls to them when the log is at its end). */
+  markLog(lines) {
+    for (const el of this.el.log.querySelectorAll('.log-now')) el.classList.remove('log-now');
+    for (const i of lines) {
+      const l = this.logByI.get(i);
+      if (l) l.el.classList.add('log-now');
+    }
+  }
+
+  /** Where objects of a step's events are before it is applied (cards leave the board as the state changes). */
+  boxesOf(events) {
+    const boxes = new Map();
+    for (const e of events) {
+      if (e.kind === 'move' && e.id) {
+        const b = this.fx.rect(this.elementOf(e.id));
+        if (b) boxes.set(e.id, b);
+      }
+    }
+    return boxes;
+  }
+
+  /** The board element that shows an object: a card, a stack of identical tokens, a player's avatar. */
+  elementOf(id) {
+    if (!id) return null;
+    const avatar = this.board.querySelector(`.player-info[data-id="${id}"] .avatar`);
+    if (avatar) return avatar;
+    return this.board.querySelector(`.card[data-id="${id}"]`)
+      || (this.memberHost.has(id) ? this.board.querySelector(`.card[data-id="${this.memberHost.get(id)}"]`) : null);
+  }
+
+  /** Where a zone of a player is on the board, for cards moving to or from it. */
+  anchorOf(zone, owner) {
+    const info = this.board.querySelector(`.player-info[data-id="${owner}"]`) || this.el.topInfo;
+    const top = info.classList.contains('top');
+    const pick = (...els) => els.find((el) => el && el.getBoundingClientRect().width > 0) || info.querySelector('.avatar');
+    switch (zone) {
+      case 'GRAVEYARD': return pick(info.querySelector('.z-graveyard'));
+      case 'EXILED': return pick(info.querySelector('.z-exile'), info.querySelector('.z-graveyard'));
+      case 'LIBRARY': return pick(info.querySelector('.z-library'));
+      case 'HAND': return pick(top ? this.el.topHand : this.el.botHand, info.querySelector('.z-hand'));
+      case 'STACK': return pick(this.el.stack, this.el.phase);
+      case 'BATTLEFIELD': return pick(top ? this.el.topCreatures : this.el.botCreatures);
+      default: return info.querySelector('.avatar');
+    }
+  }
+
+  /** A card's data in a state: on a battlefield, in a graveyard or hand, in exile or on the stack. */
+  findCard(id, st) {
+    if (!id || !st) return null;
+    for (const p of st.players || []) {
+      for (const z of ['battlefield', 'graveyard', 'hand']) {
+        const c = (p[z] || []).find((x) => x.id === id);
+        if (c) return c;
+      }
+    }
+    return (st.exile || []).find((x) => x.id === id) || (st.stack || []).find((x) => x.id === id || x.card_id === id) || null;
+  }
+
+  nameIn(id, st) {
+    if (!id || !st) return null;
+    const p = (st.players || []).find((x) => x.id === id);
+    if (p) return p.name;
+    const c = this.findCard(id, st);
+    return c ? c.name : null;
+  }
+
+  /** A card for a visual step: drawn as on the board, outside the board's own cards. */
+  fxCard(card) {
+    const el = renderCard(new Map(), { ...card, id: `fx-${card.id || card.name}`, hidden: false });
+    el.classList.add('fx-card');
+    const img = el.querySelector('img');
+    if (img) img.loading = 'eager'; // shown at once, outside the page's flow
+    return el;
   }
 
   // --- sizing ----------------------------------------------------------------------------------------
@@ -1083,6 +1467,11 @@ export class GameView {
   }
 
   onKey(ev) {
+    if (ev.key === 'Escape' && (this.playing || this.queue.length) && !document.querySelector('.modal-overlay')) {
+      ev.preventDefault();
+      this.skip();
+      return;
+    }
     if (!this.decision || document.querySelector('.modal-overlay')) return;
     if (ev.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(ev.target.tagName)) return;
     if (ev.key === ' ' || ev.key === 'Enter') {
