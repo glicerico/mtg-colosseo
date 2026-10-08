@@ -93,6 +93,12 @@ public final class GameSession {
 
     /** browser views' account of each game event (game thread) */
     private final EventFeed feed = new EventFeed();
+    /**
+     * Event messages not sent yet: they wait for the next log line, update or decision, so that what a roll-back
+     * undoes (a cancelled cast, a previewed block) is dropped, never sent. Bookmark -> how many were waiting then.
+     */
+    private final List<Runnable> unsentEvents = new ArrayList<>();
+    private final Map<Integer, Integer> eventMarks = new HashMap<>();
 
     // cached views for newly attached clients (written by the game thread)
     private final Map<Integer, JsonObject> lastSeatState = new ConcurrentHashMap<>();
@@ -141,7 +147,22 @@ public final class GameSession {
         KeepFirstLondonMulligan mulligan = new KeepFirstLondonMulligan(0);
         // the live game reports its events for the browsers' event feed; the copies XMage's AI simulates on don't
         game = new ObservedDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE, mulligan, 40, config.startingLife, 7,
-                this::onGameEvent);
+                new ObservedDuel.Observer() {
+                    @Override
+                    public void event(mage.game.Game g, mage.game.events.GameEvent e) {
+                        onGameEvent(g, e);
+                    }
+
+                    @Override
+                    public void bookmarked(int bookmark) {
+                        markEvents(bookmark);
+                    }
+
+                    @Override
+                    public void restored(int bookmark) {
+                        dropEvents(bookmark);
+                    }
+                });
         GameOptions options = new GameOptions();
         options.rollbackTurnsAllowed = false;
         game.setGameOptions(options);
@@ -225,6 +246,7 @@ public final class GameSession {
     }
 
     private void finish() {
+        sendEvents();
         endedAt = System.currentTimeMillis();
         for (Seat seat : seats) {
             seat.pending.set(null);
@@ -565,6 +587,7 @@ public final class GameSession {
     }
 
     private void onUpdate() {
+        sendEvents();
         if (config.maxTurns > 0 && game.getTurnNum() > config.maxTurns && !drawDeclared) {
             drawDeclared = true;
             if ("void".equals(config.turnLimitResult)) {
@@ -654,8 +677,8 @@ public final class GameSession {
                 return;
             }
             for (Seat seat : views) {
-                JsonObject state = StateView.build(game, seat.playerId, false, seatIndex, true);
-                seat.broadcast(feed.message(ev, state, "seat" + seat.index));
+                JsonObject msg = feed.message(ev, StateView.build(game, seat.playerId, false, seatIndex, true), "seat" + seat.index);
+                queueEvent(() -> seat.broadcast(msg));
             }
             if (!spectators.isEmpty()) {
                 JsonObject normal = null;
@@ -667,10 +690,51 @@ public final class GameSession {
                         normal = feed.message(ev, StateView.build(game, null, false, seatIndex, true), "spectators");
                     }
                 }
-                broadcastSpectators(revealed != null ? revealed : normal, normal != null ? normal : revealed);
+                JsonObject r = revealed != null ? revealed : normal;
+                JsonObject n = normal != null ? normal : revealed;
+                queueEvent(() -> broadcastSpectators(r, n));
             }
         } catch (RuntimeException ex) {
             LOG.debug("event feed: " + e.getType(), ex); // the feed is only for the browsers' eyes: the game goes on
+        }
+    }
+
+    private void queueEvent(Runnable send) {
+        synchronized (unsentEvents) {
+            unsentEvents.add(send);
+        }
+    }
+
+    /** Sends the event messages waiting: called before each log line, update and decision, and at the end. */
+    private void sendEvents() {
+        List<Runnable> out;
+        synchronized (unsentEvents) {
+            if (unsentEvents.isEmpty()) {
+                return;
+            }
+            out = new ArrayList<>(unsentEvents);
+            unsentEvents.clear();
+            eventMarks.clear();
+        }
+        for (Runnable send : out) {
+            send.run();
+        }
+    }
+
+    private void markEvents(int bookmark) {
+        synchronized (unsentEvents) {
+            eventMarks.put(bookmark, unsentEvents.size());
+        }
+    }
+
+    /** The game went back to a bookmark: the events since then didn't happen. */
+    private void dropEvents(int bookmark) {
+        synchronized (unsentEvents) {
+            int keep = eventMarks.getOrDefault(bookmark, 0);
+            while (unsentEvents.size() > keep) {
+                unsentEvents.remove(unsentEvents.size() - 1);
+            }
+            eventMarks.keySet().removeIf(b -> b >= bookmark);
         }
     }
 
@@ -698,6 +762,7 @@ public final class GameSession {
         if (text == null || text.isEmpty()) {
             return;
         }
+        sendEvents();
         JsonObject entry = new JsonObject();
         entry.addProperty("i", log.size());
         entry.addProperty("turn", game == null ? 0 : game.getTurnNum());
@@ -724,6 +789,7 @@ public final class GameSession {
      * Publishes a decision to the seat's clients (game thread; the caller then waits for the answer).
      */
     void publish(Seat seat, Decision d) {
+        sendEvents();
         JsonObject queued = seat.nextQueuedChoice(d);
         if (queued != null) {
             d.responder.validate(queued);
