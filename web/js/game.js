@@ -1128,7 +1128,9 @@ export class GameView {
 
   /** A card for a visual step: drawn as on the board, outside the board's own cards. */
   fxCard(card) {
-    const el = renderCard(new Map(), { ...card, id: `fx-${card.id || card.name}`, hidden: false });
+    // upright and plain: the board shows its state (tapped, attacking, damage)
+    const el = renderCard(new Map(), { ...card, id: `fx-${card.id || card.name}`, hidden: false, tapped: false, attacking: false,
+      blocking: false, summoning_sick: false, damage: 0 });
     el.classList.add('fx-card');
     const img = el.querySelector('img');
     if (img) img.loading = 'eager'; // shown at once, outside the page's flow
