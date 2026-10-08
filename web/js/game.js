@@ -37,6 +37,11 @@ const LAG_MS = 5000;
 const MIN_STEP_MS = 250;
 const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
 
+// what a log line about each kind of event says (XMage's wording)
+const LOG_WORDS = { cast: /\bcasts\b/, ability: /activat|ability/i, trigger: /\btriggers\b/, attack: /\battacks\b/,
+  block: /\bblocked by\b|\bblocks\b/, damage: /\bdamage\b|\bloses \d+ life\b/, life: /\blife\b/, countered: /\bcounter/,
+  move: /graveyard|battlefield|exile|hand|library|draws|creates|token|plays|sacrific/i };
+
 /** Which step an event belongs to: events the engine reports one by one but that are one action go together. */
 function stepKey(ev) {
   if (ev.kind === 'move' && ev.to === 'STACK') return 'to-stack'; // a card going to the stack: part of casting it
@@ -1026,23 +1031,28 @@ export class GameView {
     return texts.join(' · ');
   }
 
-  /** The log lines a step's events name: XMage writes them just before or after the event (log_at). */
+  /**
+   * The log lines a step's events name. XMage writes each line just before or just after its event (log_at): the
+   * nearest line that names one of the event's objects ("Cadet [dc9]": an id's first characters) and says what
+   * kind of thing happened; else the nearest that says it; else the line at log_at.
+   */
   logLinesOf(events) {
     const out = new Set();
     for (const ev of events) {
       if (ev.log_at === undefined || stepKey(ev) === 'to-stack') continue;
       const ids = [ev.id, ev.card_id, ev.source_id, ev.attacker, ev.blocker, ev.target, ev.source]
         .filter(Boolean).map((x) => `[${x.slice(0, 3)}]`);
-      let best = null;
-      if (ev.kind !== 'attack') {
+      const says = LOG_WORDS[ev.kind] || /./;
+      const near = (ok) => {
+        let best = null;
         for (let i = ev.log_at - 3; i <= ev.log_at + 3; i++) {
           const l = this.logByI.get(i);
-          if (l && ids.some((x) => l.entry.text.includes(x)) && (best === null || Math.abs(i - ev.log_at) < Math.abs(best - ev.log_at))) best = i;
+          if (l && ok(l.entry.text) && (best === null || Math.abs(i - ev.log_at) < Math.abs(best - ev.log_at))) best = i;
         }
-      }
-      // XMage writes life, damage and triggers just before their event, the rest just after
-      const order = ['life', 'damage', 'trigger'].includes(ev.kind) ? [ev.log_at - 1, ev.log_at] : [ev.log_at, ev.log_at - 1];
-      if (best === null) best = order.find((i) => this.logByI.has(i)) ?? null;
+        return best;
+      };
+      const best = near((t) => says.test(t) && ids.some((x) => t.includes(x))) ?? near((t) => says.test(t))
+        ?? [ev.log_at, ev.log_at - 1].find((i) => this.logByI.has(i)) ?? null;
       if (best !== null) out.add(best);
     }
     return [...out].sort((a, b) => a - b);
