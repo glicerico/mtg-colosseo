@@ -1,7 +1,7 @@
 // Game board: renders the observation and turns clicks into protocol actions.
 import { wsUrl, getGame, seatToken, ownerToken, forgetToken } from './api.js';
 import { h, modal, toast, closeAllModals, manaSymbols, escapeRules } from './ui.js';
-import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE, onTokenImage } from './cards.js';
+import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE, onTokenImage, imageUrl } from './cards.js';
 import { Fx } from './fx.js';
 
 const STEPS = [
@@ -828,6 +828,13 @@ export class GameView {
    * drawn over it for a moment; the board always ends on the latest state, and Skip goes there at once.
    */
   enqueue(frame) {
+    const ev = frame.event;
+    if (ev && ['cast', 'ability', 'trigger'].includes(ev.kind) && this.pace !== 'off') {
+      // its step shows the card large: fetch the picture while the steps before it play
+      const so = (frame.state.stack || []).find((x) => x.id === ev.id);
+      const url = so && imageUrl(so.kind === 'ability' ? (this.findCard(ev.source_id, frame.state) || so) : so);
+      if (url) new Image().src = url;
+    }
     if (this.pace === 'off' || (!this.playing && !this.queue.length && !frame.event)) {
       this.applyBatch([frame], false);
       return;
@@ -1339,8 +1346,10 @@ export class GameView {
     if (!d) {
       bar.className = 'prompt-bar idle';
       const opp = this.players()[0];
+      const yours = this.queue.some((f) => f.decision);
       bar.replaceChildren(h('span', { class: 'prompt-text muted' },
-        this.sent ? 'Waiting…' : opp ? `Waiting for ${opp.name}…` : 'Waiting…'));
+        yours ? 'Your decision comes after these steps (Esc shows it now)…'
+          : this.sent ? 'Waiting…' : opp ? `Waiting for ${opp.name}…` : 'Waiting…'));
       return;
     }
     bar.className = 'prompt-bar active';
