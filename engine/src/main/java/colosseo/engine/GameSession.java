@@ -90,6 +90,8 @@ public final class GameSession {
     private volatile long endedAt;
     private boolean drawDeclared;
     private BufferedWriter recorder;
+    /** object names that are the same in every run of the seed (recorded and replayed XMage AI moves) */
+    private final StableIds stableIds = new StableIds();
 
     // cached views for newly attached clients (written by the game thread)
     private final Map<Integer, JsonObject> lastSeatState = new ConcurrentHashMap<>();
@@ -145,12 +147,14 @@ public final class GameSession {
             GameConfig.SeatConfig sc = seat.config();
             Deck deck = manager.decks().load(sc.deck);
             seat.deckFingerprint = DeckLibrary.fingerprint(deck);
-            Player player = createPlayer(sc);
+            Player player = createPlayer(sc, seat.index);
             seat.player = player;
             seat.playerId = player.getId();
             if (player instanceof BridgePlayer) {
                 ((BridgePlayer) player).attachSeat(seat);
             }
+            stableIds.addPlayer(player.getId(), seat.index);
+            stableIds.addDeck(seat.index, deck.getCards());
             game.loadCards(deck.getCards(), player.getId());
             game.addPlayer(player, deck);
             match.addPlayer(player, deck);
@@ -158,6 +162,7 @@ public final class GameSession {
             seatIndex.put(player.getId(), seat.index);
         }
 
+        StableIds.register(game, stableIds);
         game.addTableEventListener((Listener<TableEvent>) this::onTableEvent);
         game.addPlayerQueryEventListener((Listener<PlayerQueryEvent>) this::onQuery);
 
@@ -174,11 +179,18 @@ public final class GameSession {
         thread.start();
     }
 
-    private Player createPlayer(GameConfig.SeatConfig sc) {
+    private Player createPlayer(GameConfig.SeatConfig sc, int seatIndex) {
         Player player;
         switch (sc.type) {
             case "xmage":
-                player = new ComputerPlayerControllableProxy(sc.name, RangeOfInfluence.ONE, sc.skill);
+                if (sc.aiMoves != null || sc.aiReplay != null) {
+                    ReplayableAiPlayer.Context ctx = new ReplayableAiPlayer.Context(stableIds, seatIndex, seed,
+                            sc.aiMoves != null ? line -> record("ai_move", line) : null, sc.aiReplay,
+                            note -> record("ai_replay_divergence", note));
+                    player = new ReplayableAiPlayer(sc.name, RangeOfInfluence.ONE, sc.skill, ctx);
+                } else {
+                    player = new ComputerPlayerControllableProxy(sc.name, RangeOfInfluence.ONE, sc.skill);
+                }
                 player.setUserData(UserData.getDefaultUserDataView());
                 break;
             default:
@@ -278,6 +290,12 @@ public final class GameSession {
                 addLog("WARNING: this rated result could not be saved and will not survive a server restart");
             }
         }
+        for (Seat seat : seats) {
+            // owner-only line (seat views drop it): how far a replayed XMage seat followed its recorded moves
+            if (seat.player instanceof ReplayableAiPlayer && ((ReplayableAiPlayer) seat.player).ctx.replay != null) {
+                record("ai_replay", ((ReplayableAiPlayer) seat.player).ctx.summary());
+            }
+        }
         record("result", r);
         closeRecorder();
 
@@ -339,6 +357,7 @@ public final class GameSession {
     private void releaseGame() {
         if (game != null) {
             finalTurn = game.getTurnNum();
+            StableIds.unregister(game);
         }
         game = null;
         for (Seat seat : seats) {

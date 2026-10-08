@@ -437,9 +437,15 @@ public final class StateView {
     /**
      * A stable ordering key for an object that does not depend on its (random) id: options are listed in this
      * order, so the same position means the same choice in every replay of a seed. Objects with equal keys are
-     * interchangeable for the game (two untapped Plains).
+     * interchangeable for the game (two untapped Plains); among them, and among players of the same name, the
+     * object's name in {@link StableIds} (its deck position, its creation order) decides, so their order is the same
+     * in every run of the seed too, not the order of their random ids.
      */
     static String sortKey(Game game, UUID id) {
+        return objectKey(game, id) + "||" + StableIds.tiebreak(game, id);
+    }
+
+    private static String objectKey(Game game, UUID id) {
         StringBuilder k = new StringBuilder();
         if (game.getPlayer(id) != null) {
             return "0|" + game.getPlayer(id).getName();

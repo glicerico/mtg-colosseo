@@ -69,6 +69,15 @@ public final class GameConfig {
          * content hash of the agent's code, if the client provides one
          */
         public String agentHash;
+        /**
+         * xmage seats only: "record" logs every move of XMage's AI (record lines "ai_move") so that the game can
+         * be replayed from its moves; null (default) plays the plain AI
+         */
+        public String aiMoves;
+        /**
+         * xmage seats only: the "ai_move" lines of a recorded game, applied instead of the AI's own play
+         */
+        public JsonArray aiReplay;
 
         public boolean isBridge() {
             return "human".equals(type) || "agent".equals(type);
@@ -98,6 +107,22 @@ public final class GameConfig {
             if (s.agentId != null && (s.agentId.isBlank() || s.agentId.length() > 200)) {
                 throw new IllegalArgumentException("agent_id must be 1-200 characters");
             }
+            s.aiMoves = Json.getString(o, "ai_moves", null);
+            if (s.aiMoves != null && !s.aiMoves.equals("record")) {
+                throw new IllegalArgumentException("ai_moves must be 'record'");
+            }
+            if (o.has("ai_replay") && !o.get("ai_replay").isJsonNull()) {
+                if (!o.get("ai_replay").isJsonArray()) {
+                    throw new IllegalArgumentException("ai_replay must be a list of recorded ai_move lines");
+                }
+                s.aiReplay = o.getAsJsonArray("ai_replay");
+            }
+            if ((s.aiMoves != null || s.aiReplay != null) && !"xmage".equals(s.type)) {
+                throw new IllegalArgumentException("ai_moves and ai_replay are for xmage seats");
+            }
+            if (s.aiMoves != null && s.aiReplay != null) {
+                throw new IllegalArgumentException("a seat either records or replays its AI moves");
+            }
             return s;
         }
 
@@ -123,6 +148,12 @@ public final class GameConfig {
             }
             if (!isBridge()) {
                 o.addProperty("skill", skill);
+                if (aiMoves != null) {
+                    o.addProperty("ai_moves", aiMoves);
+                }
+                if (aiReplay != null) {
+                    o.addProperty("ai_replay_lines", aiReplay.size());
+                }
             } else {
                 o.addProperty("auto_pass", autoPassNoActions);
                 o.addProperty("stop_policy", stopPolicy);

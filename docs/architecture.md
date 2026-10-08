@@ -71,8 +71,11 @@ per-seat record exports, never the raw records.
 thread (a game's thread) its own generator instead of reseeding the one shared by every game, the few
 unseeded `Collections.shuffle` calls use it, and a deck's cards keep their order when they become a library
 (XMage collected them into a hash set). The engine also lists options (actions, targets, attackers, blockers,
-mana sources) in a canonical order instead of XMage's id-hash order, and auto-pay considers mana sources in
-that order. Together, a seed reproduces a game between deterministic players.
+mana sources) in a canonical order instead of XMage's id-hash order (equal objects by their deck position or
+creation order), and auto-pay considers mana sources in that order. Together, a seed reproduces a game between
+deterministic players. XMage's AI is not one (it searches against a clock and in id-hash order): an `xmage` seat
+with `"ai_moves": "record"` records its moves so the game can be replayed from them (`ai_replay`, see the
+protocol).
 
 ## Adding decks and sets
 

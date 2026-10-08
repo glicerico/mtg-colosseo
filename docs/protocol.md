@@ -54,6 +54,14 @@ Seat `type`: `agent` or `human` (controlled over the WebSocket - they differ onl
 the server allows deck paths: by default on a loopback server), or `sealed:SET` (six boosters of SET, auto-built into
 a 40-card two-color deck).
 
+Options for `xmage` seats, to replay a game against the AI from its moves (the AI's own play is not reproducible
+from the seed: it searches against a clock and iterates over objects in the order of their random ids):
+
+| key | default | meaning |
+|---|---|---|
+| `ai_moves` | - | `"record"`: log every decision the game asks of the AI, the moves it makes and the outcome, with the whole game state at each decision in names that are the same in every run of the seed, as `ai_move` lines of the full record (seat views never contain them). The AI's thinking then draws from its own random generator, so the seed's games differ from those of a seat without this option |
+| `ai_replay` | - | the `ai_move` lines of a recorded game (their `state` may be left out: `state_sha` is compared): the seat answers each decision from them instead of thinking, after checking that the game asks the recorded decision in the recorded state. The first difference is recorded as an `ai_replay_divergence` line when it happens, and the seat plays live from there; an `ai_replay` line before the result says how far it got |
+
 Options for `agent`/`human` seats:
 
 | key | default (agent / human) | meaning |
