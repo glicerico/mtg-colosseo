@@ -260,3 +260,49 @@ def test_agent_seats_keep_the_xmage_mulligan_order():
     assert agent.steps == [("mulligan", 7, None), ("bottom", 7, None), ("mulligan", 6, None), ("bottom", 7, None),
                            ("bottom", 6, None), ("mulligan", 5, None)]
     assert agent.opening == 5
+
+
+class _Events(HeuristicAgent):
+    """Plays like the heuristic and keeps the browser events it is sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def on_event(self, message):
+        if message.get("type") == "event":
+            self.events.append(message)
+
+
+def test_event_feed_reaches_browser_views_only():
+    """Browser views (human-type seats) get one `event` per engine event with their view right after it, so the
+    page can show an opponent's spell and its targets even when the seat can't respond; agents never get any. A
+    card the view can't see moving (the opponent drawing) comes without its id."""
+    import threading
+    from colosseo import play
+    game = ColosseoClient(SERVER).create_game([{"type": "human", "deck": "fdn:gruul-stompers", "stop_policy": "all"},
+                                               {"type": "agent", "deck": "fdn:selesnya-pack"}],
+                                              seed=7, starting_seat=0, max_turns=8, record=False)
+    tokens = {s["seat"]: s.get("token") for s in game["seats"]}
+    seats = [_Events(), _Events()]
+    threads = [threading.Thread(target=play, args=(seats[s], game["game_id"], s, SERVER), kwargs={"token": tokens[s]})
+               for s in (0, 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(300)
+    human, agent = seats
+    assert agent.events == []
+    kinds = {m["event"]["kind"] for m in human.events}
+    assert {"cast", "move"} <= kinds, kinds
+    assert all("state" in m and "seq" in m["event"] and "log_at" in m["event"] for m in human.events)
+    seqs = [m["event"]["seq"] for m in human.events]
+    assert seqs == sorted(seqs)
+    me = human.events[0]["state"]["you"]
+    draws = [m["event"] for m in human.events if m["event"]["kind"] == "move" and m["event"]["from"] == "LIBRARY"
+             and m["event"]["to"] == "HAND"]
+    assert any(e["owner"] != me for e in draws) and any(e["owner"] == me for e in draws)
+    assert all(e.get("hidden") and "id" not in e for e in draws if e["owner"] != me)
+    assert all("id" in e for e in draws if e["owner"] == me)
+    casts = [m for m in human.events if m["event"]["kind"] == "cast"]
+    assert all(any(s["id"] == m["event"]["id"] for s in m["state"]["stack"]) for m in casts)

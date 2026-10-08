@@ -8,7 +8,6 @@ import mage.constants.MultiplayerAttackOption;
 import mage.constants.RangeOfInfluence;
 import mage.game.Game;
 import mage.game.GameOptions;
-import mage.game.TwoPlayerDuel;
 import mage.game.TwoPlayerMatch;
 import mage.game.match.MatchOptions;
 import mage.game.events.Listener;
@@ -92,6 +91,9 @@ public final class GameSession {
     /** object names that are the same in every run of the seed (recorded and replayed XMage AI moves) */
     private final StableIds stableIds = new StableIds();
 
+    /** browser views' account of each game event (game thread) */
+    private final EventFeed feed = new EventFeed();
+
     // cached views for newly attached clients (written by the game thread)
     private final Map<Integer, JsonObject> lastSeatState = new ConcurrentHashMap<>();
     private volatile JsonObject lastSpectatorState;
@@ -137,7 +139,9 @@ public final class GameSession {
         // the London mulligan; seats with mulligan_keep_first (human seats by default) decide keep-or-mulligan before
         // putting cards on the bottom
         KeepFirstLondonMulligan mulligan = new KeepFirstLondonMulligan(0);
-        game = new TwoPlayerDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE, mulligan, 40, config.startingLife, 7);
+        // the live game reports its events for the browsers' event feed; the copies XMage's AI simulates on don't
+        game = new ObservedDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE, mulligan, 40, config.startingLife, 7,
+                this::onGameEvent);
         GameOptions options = new GameOptions();
         options.rollbackTurnsAllowed = false;
         game.setGameOptions(options);
@@ -577,6 +581,9 @@ public final class GameSession {
                 watched = true;
                 JsonObject state = StateView.build(game, seat.playerId, false, seatIndex, explains(seat.playerId));
                 lastSeatState.put(seat.index, state);
+                if (explains(seat.playerId)) {
+                    feed.seen("seat" + seat.index, state);
+                }
                 JsonObject msg = new JsonObject();
                 msg.addProperty("type", "state");
                 msg.add("state", state);
@@ -608,15 +615,62 @@ public final class GameSession {
         }
         if (needNormal) {
             lastSpectatorState = StateView.build(game, null, false, seatIndex, true);
+            feed.seen("spectators", lastSpectatorState);
         }
         if (needRevealed) {
             lastSpectatorStateRevealed = StateView.build(game, null, true, seatIndex, true);
+            feed.seen("spectators-revealed", lastSpectatorStateRevealed);
         }
         for (Connection c : spectators) {
             JsonObject msg = new JsonObject();
             msg.addProperty("type", "state");
             msg.add("state", c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState);
             c.send(msg);
+        }
+    }
+
+    /**
+     * A game event of the live game ({@link ObservedDuel}), after XMage has handled it: browser views (human seats,
+     * spectators) get it with their state right after it ({@link EventFeed}); agents' connections never do. Nothing
+     * happens without a browser view, before the first turn (the mulligans) or off the game thread.
+     */
+    private void onGameEvent(mage.game.Game g, mage.game.events.GameEvent e) {
+        if (g != game || !EventFeed.TYPES.contains(e.getType()) || Thread.currentThread() != thread
+                || game.getTurnStepType() == null) {
+            return;
+        }
+        List<Seat> views = new ArrayList<>();
+        for (Seat seat : seats) {
+            if (seat.hasConnections() && explains(seat.playerId)) {
+                views.add(seat);
+            }
+        }
+        if (views.isEmpty() && spectators.isEmpty()) {
+            return;
+        }
+        try {
+            JsonObject ev = feed.describe(game, e, log.size());
+            if (ev == null) {
+                return;
+            }
+            for (Seat seat : views) {
+                JsonObject state = StateView.build(game, seat.playerId, false, seatIndex, true);
+                seat.broadcast(feed.message(ev, state, "seat" + seat.index));
+            }
+            if (!spectators.isEmpty()) {
+                JsonObject normal = null;
+                JsonObject revealed = null;
+                for (Connection c : spectators) {
+                    if (c.revealAll && revealed == null) {
+                        revealed = feed.message(ev, StateView.build(game, null, true, seatIndex, true), "spectators-revealed");
+                    } else if (!c.revealAll && normal == null) {
+                        normal = feed.message(ev, StateView.build(game, null, false, seatIndex, true), "spectators");
+                    }
+                }
+                broadcastSpectators(revealed != null ? revealed : normal, normal != null ? normal : revealed);
+            }
+        } catch (RuntimeException ex) {
+            LOG.debug("event feed: " + e.getType(), ex); // the feed is only for the browsers' eyes: the game goes on
         }
     }
 

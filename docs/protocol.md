@@ -165,6 +165,7 @@ agent plus a human watching its view); any of them can answer.
 | `info` | `message`: an engine notice for this seat (e.g. why a block was illegal) |
 | `error` | `message`, optional `decision_id` and `code`: `"invalid"` = your answer was rejected and the decision stays pending (answer again); `"stale"` = the answer was for a decision that is no longer pending (e.g. a resend after reconnecting; ignore it) |
 | `game_over` | `result` (below) |
+| `event` | browser views only (seats of type `human`, spectators): `event`, one engine event, and `state`, this view right after it (see Events for the browser) |
 
 `result`: `status` (`"finished"` when the rules engine ended the game; `"terminated"`, `"abandoned"`,
 `"timeout"`, `"limit"`, `"turn_limit"` (with `turn_limit_result: "void"`) or `"error"` otherwise),
@@ -284,3 +285,23 @@ Tokens in the same views also carry `token_image`, which picture shows them: the
 engine chose for the token (its set code, its name as Scryfall names tokens, its variant when that set has several
 of the name), e.g. `{"set": "FRA", "name": "Heartwood"}`. A token that copies a card has none: its `set` and `number`
 are the card's. The web UI looks the picture up on Scryfall (that set's tokens first, then any set).
+
+### Events for the browser
+
+XMage reports changes only at priority rounds and resolutions, so the `state` messages never show, for instance,
+an opponent's spell on the stack when you can't respond to it. Browser views therefore also get one `event`
+message per engine event, with the view right after it, which the web UI plays back step by step. Agents'
+connections never get them, and nothing about them goes into game records. Events name objects by id only (the
+names come from the `state`, masked as it is), and carry `seq` (their order in the game) and `log_at` (how many
+log lines there were when it happened: XMage writes the matching line just before or after).
+
+| `kind` | fields |
+|---|---|
+| `cast` | `id` (the spell), `card_id`, `player`, `from` (zone), `targets` |
+| `ability`, `trigger` | `id` (on the stack), `source_id`, `player`, `targets` (mana abilities and abilities that don't use the stack have none) |
+| `attack` | `attacker`, `defender` (a player or planeswalker), `player` |
+| `block` | `blocker`, `attacker`, `player` |
+| `damage` | `target`, `source`, `amount`, `combat`, `to_player` |
+| `life` | `player`, `amount` (gained: positive, lost: negative), `source` |
+| `move` | `id`, `from`, `to` (zones: `HAND`, `LIBRARY`, `BATTLEFIELD`, `GRAVEYARD`, `EXILED`, `STACK`, `OUTSIDE`, ...), `owner`, `token`; a card this view saw neither before nor after the move (an opponent's draw) comes without `id` and with `hidden: true` |
+| `countered` | `id`, `player` |
