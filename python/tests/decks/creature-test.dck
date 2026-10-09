@@ -1,0 +1,4 @@
+# description: test fixture: two-mana creatures, the spells the counter test counters
+NAME:Creature Test
+20 [FRA:287] Mountain
+20 [FRA:81] Eardrum Rattler

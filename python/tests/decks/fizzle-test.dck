@@ -1,0 +1,5 @@
+# description: test fixture: a creature and Unsummon, to take a removal spell's only target away (it fizzles)
+NAME:Fizzle Test
+20 [FRA:283] Island
+10 [FRA:27] Cryotheory Adept
+10 [FRA:46] Unsummon

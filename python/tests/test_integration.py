@@ -4,7 +4,7 @@ import pytest
 from colosseo import ColosseoClient, ColosseoEnv, run_game, run_match
 from colosseo.agents import HeuristicAgent, RandomAgent
 
-from .conftest import DIALOG_DECK, SERVER, server_up
+from .conftest import DECKS, DIALOG_DECK, SERVER, server_up
 
 pytestmark = [pytest.mark.integration,
               pytest.mark.skipif(not server_up(), reason=f"no Colosseo server at {SERVER}")]
@@ -306,3 +306,148 @@ def test_event_feed_reaches_browser_views_only():
     assert all("id" in e for e in draws if e["owner"] == me)
     casts = [m for m in human.events if m["event"]["kind"] == "cast"]
     assert all(any(s["id"] == m["event"]["id"] for s in m["state"]["stack"]) for m in casts)
+
+
+class _Scripted(_Events):
+    """Plays by `rule` where it answers (else like the heuristic) and keeps the browser events it is sent, with the
+    names of the cards they name (from their states)."""
+
+    def __init__(self, rule):
+        super().__init__()
+        self.rule, self.names = rule, {}
+
+    def on_event(self, message):
+        super().on_event(message)
+        st = message.get("state") or {}
+        for p in st.get("players", []):
+            for zone in ("battlefield", "graveyard", "hand"):
+                self.names.update((c["id"], c.get("name")) for c in p.get(zone) or [])
+        for s in st.get("stack") or []:
+            self.names.update((k, s.get("name")) for k in (s["id"], s.get("card_id")) if k)
+
+    def decide(self, d):
+        action = self.rule(d)
+        return action if action is not None else super().decide(d)
+
+
+def _priority(d, *plays):
+    """In this seat's main phase with an empty stack, the first of `plays` (an action, or (action, card name)) it can
+    make; else None."""
+    st = d.raw.get("state") or {}
+    if st.get("active_player") != st.get("you") or not (st.get("step") or "").endswith("MAIN") or st.get("stack"):
+        return None
+    for play in plays:
+        action, name = play if isinstance(play, tuple) else (play, None)
+        o = [o for o in d.options if o.get("action") == action and name in (None, o.get("source_name"))]
+        if o:
+            return d.choose(o[0])
+    return None
+
+
+def _quiet(d):
+    """Keeps, never attacks, blocks or pays; None for anything else."""
+    if d.kind == "mulligan":
+        return d.choose("keep")
+    if d.kind == "declare_attackers":
+        return d.attack([])
+    if d.kind == "declare_blockers":
+        return d.block([])
+    if d.kind == "yes_no":
+        return d.choose("no")
+    return None
+
+
+def _target(d, name):
+    """The target called `name`, if it is an option; else None (the heuristic answers)."""
+    o = next((o for o in d.options if (o.get("name") or o.get("label") or "").startswith(name)), None)
+    return d.choose(o) if o else None
+
+
+def _scripted_game(decks, rules, seed, turns):
+    import threading
+    from colosseo import play
+    game = ColosseoClient(SERVER).create_game([{"type": "human", "name": "Human", "deck": decks[0], "stop_policy": "all"},
+                                               {"type": "agent", "name": "Opp", "deck": decks[1], "stop_policy": "all"}],
+                                              seed=seed, starting_seat=0, max_turns=turns, turn_limit_result="void",
+                                              record=False)
+    tokens = {s["seat"]: s.get("token") for s in game["seats"]}
+    seats = [_Scripted(rules[0]), _Scripted(rules[1])]
+    threads = [threading.Thread(target=play, args=(seats[s], game["game_id"], s, SERVER), kwargs={"token": tokens[s]})
+               for s in (0, 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(300)
+    return seats
+
+
+def _left_stack(seat, name):
+    """How each card called `name` left the stack, as the browser view was told: [(to, reason, by's name)]."""
+    return [(e["to"], e.get("reason"), seat.names.get(e.get("by"))) for e in (m["event"] for m in seat.events)
+            if e["kind"] == "move" and e["from"] == "STACK" and seat.names.get(e.get("id")) == name]
+
+
+def test_a_countered_spell_leaves_the_stack_countered():
+    """Human counters Opp's Eardrum Rattler with Icy Reception, and Opp doesn't pay: the browser view is told the
+    Rattler left the stack countered, by Icy Reception, which itself resolved. Nothing says the Rattler resolved, and
+    no separate `countered` event repeats it (those are for what doesn't move: abilities, copies of spells)."""
+    def human(d):
+        if d.kind == "priority":
+            theirs = [s for s in d.raw["state"].get("stack") or [] if s.get("controller") != d.raw["state"].get("you")]
+            icy = [o for o in d.options if o.get("action") == "cast" and o.get("source_name") == "Icy Reception"]
+            if theirs and theirs[-1].get("name") == "Eardrum Rattler" and icy:
+                return d.choose(icy[0])
+            return _priority(d, "play_land") or d.pass_priority()
+        if d.kind == "choose_mode":
+            return d.choose(next(o for o in d.options if "Counter" in (o.get("label") or "")))
+        if d.kind == "target":
+            return _target(d, "Eardrum Rattler")
+        return _quiet(d)
+
+    def opp(d):
+        if d.kind == "priority":
+            return _priority(d, "play_land", ("cast", "Eardrum Rattler")) or d.pass_priority()
+        return _quiet(d)
+
+    human_seat, opp_seat = _scripted_game([str(DECKS / "counter-test.dck"), str(DECKS / "creature-test.dck")],
+                                          (human, opp), seed=5, turns=5)
+    assert _left_stack(human_seat, "Eardrum Rattler") == [("GRAVEYARD", "countered", "Icy Reception")]
+    assert _left_stack(human_seat, "Icy Reception") == [("GRAVEYARD", "resolved", None)]
+    assert not [m for m in human_seat.events if m["event"]["kind"] == "countered"]
+    assert opp_seat.events == []
+
+
+def test_a_spell_whose_target_is_gone_fizzles():
+    """Opp casts Last Gasp on Human's Cryotheory Adept; Human answers with Unsummon on the Adept. Last Gasp has no
+    legal target when it resolves (608.2b): the browser view is told it fizzled, not that it resolved."""
+    def human(d):
+        if d.kind == "priority":
+            st = d.raw["state"]
+            me = next(p for p in st["players"] if p["id"] == st.get("you"))
+            creatures = [c for c in me.get("battlefield", []) if "Creature" in (c.get("types") or [])]
+            lands = [c for c in me.get("battlefield", []) if "Land" in (c.get("types") or [])]
+            unsummon = [o for o in d.options if o.get("action") == "cast" and o.get("source_name") == "Unsummon"]
+            if creatures and unsummon and any(s.get("name") == "Last Gasp" for s in st.get("stack") or []):
+                return d.choose(unsummon[0])
+            plays = ["play_land"] + ([("cast", "Cryotheory Adept")] if not creatures and len(lands) >= 3 else [])
+            return _priority(d, *plays) or d.pass_priority()
+        if d.kind == "target":
+            return _target(d, "Cryotheory Adept")
+        return _quiet(d)
+
+    def opp(d):
+        if d.kind == "priority":
+            st = d.raw["state"]
+            theirs = next(p for p in st["players"] if p["id"] != st.get("you"))
+            creature = any("Creature" in (c.get("types") or []) for c in theirs.get("battlefield", []))
+            return _priority(d, "play_land", *([("cast", "Last Gasp")] if creature else [])) or d.pass_priority()
+        if d.kind == "target":
+            return _target(d, "Cryotheory Adept")
+        return _quiet(d)
+
+    human_seat, opp_seat = _scripted_game([str(DECKS / "fizzle-test.dck"), str(DECKS / "removal-test.dck")],
+                                          (human, opp), seed=5, turns=7)
+    assert _left_stack(human_seat, "Last Gasp") == [("GRAVEYARD", "fizzled", None)]
+    assert ("GRAVEYARD", "resolved", None) in _left_stack(human_seat, "Unsummon")
+    assert set(_left_stack(human_seat, "Cryotheory Adept")) == {("BATTLEFIELD", "resolved", None)}
+    assert opp_seat.events == []

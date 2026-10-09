@@ -3,6 +3,7 @@ package colosseo.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import mage.MageObject;
 import mage.cards.Card;
 import mage.constants.Zone;
 import mage.game.Game;
@@ -25,7 +26,8 @@ import java.util.UUID;
 /**
  * The browser's account of what happens, one engine event at a time ({@code event} messages, browser views only):
  * spells cast and abilities activated or triggered, with their targets; attackers and blockers declared; damage and
- * life; cards moving between zones; spells countered. XMage only reports state changes at priority rounds and
+ * life; cards moving between zones, and for a spell leaving the stack whether it resolved, was countered or fizzled;
+ * abilities and copies of spells countered. XMage only reports state changes at priority rounds and
  * resolutions, so without this a browser never sees an opponent's spell on the stack, its targets or a trigger.
  * <p>
  * Events name objects by id only; names and pictures come from the viewer's state sent with each event, so they are
@@ -123,13 +125,34 @@ final class EventFeed {
                 Permanent left = z.getTarget();
                 Permanent entered = game.getPermanent(z.getTargetId());
                 o.addProperty("token", left instanceof PermanentToken || entered instanceof PermanentToken);
+                if (z.getFromZone() == Zone.STACK) {
+                    // a spell leaving the stack: whether it resolved, was countered (by what) or fizzled
+                    String reason = leftStack(game, z);
+                    if (reason != null) {
+                        o.addProperty("reason", reason);
+                        if ("countered".equals(reason) && z.getSourceId() != null) {
+                            o.addProperty("by", Json.str(z.getSourceId()));
+                        }
+                    }
+                }
                 break;
             }
-            case COUNTERED:
+            case COUNTERED: {
+                // a countered spell's move off the stack already says so (reason, by): this is for what has no move,
+                // an ability or a copy of a spell
+                MageObject countered = game.getLastKnownInformation(e.getTargetId(), Zone.STACK);
+                if (countered instanceof Spell && !((Spell) countered).isCopy()) {
+                    return null;
+                }
                 o.addProperty("kind", "countered");
                 o.addProperty("id", Json.str(e.getTargetId()));
+                if (countered instanceof StackObject) {
+                    o.addProperty("source_id", Json.str(((StackObject) countered).getSourceId()));
+                }
+                o.addProperty("by", Json.str(e.getSourceId()));
                 o.addProperty("player", Json.str(e.getPlayerId()));
                 break;
+            }
             default:
                 return null;
         }
@@ -227,6 +250,24 @@ final class EventFeed {
             }
         }
         return bySource;
+    }
+
+    /**
+     * Why a spell left the stack, from the spell as it was then (XMage keeps it as last known information when it
+     * leaves): "resolved"; "countered", by a spell or ability; or "fizzled", when all its targets were illegal as it
+     * began to resolve (608.2b; XMage counters it then, while it resolves). Null for anything else, e.g. a spell an
+     * effect exiled from the stack.
+     */
+    static String leftStack(Game game, ZoneChangeEvent z) {
+        MageObject object = game.getLastKnownInformation(z.getTargetId(), Zone.STACK);
+        if (!(object instanceof Spell)) {
+            return null;
+        }
+        Spell spell = (Spell) object;
+        if (spell.isCountered()) {
+            return spell.isResolving() ? "fizzled" : "countered";
+        }
+        return spell.isResolving() ? "resolved" : null;
     }
 
     private static UUID owner(Game game, ZoneChangeEvent z) {
