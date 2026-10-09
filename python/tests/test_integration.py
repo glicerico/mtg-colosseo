@@ -467,3 +467,35 @@ def test_a_spell_whose_target_is_gone_fizzles():
     assert ("GRAVEYARD", "resolved", None) in _left_stack(human_seat, "Unsummon")
     assert set(_left_stack(human_seat, "Cryotheory Adept")) == {("BATTLEFIELD", "resolved", None)}
     assert opp_seat.events == []
+
+
+def test_ward_counters_are_sent_with_what_countered_them():
+    """Opp aims Burst Lightning and Fanatical Firebrand's ability at Human's Unflinching Hortimancer and never pays for
+    ward. The spell leaves the stack countered by the Hortimancer; the ability, which has no card to move, comes as a
+    `countered` event with its source and the Hortimancer."""
+    def human(d):
+        if d.kind == "priority":
+            me = next(p for p in d.raw["state"]["players"] if p["id"] == d.raw["state"].get("you"))
+            out = not any(c.get("name") == "Unflinching Hortimancer" for c in me.get("battlefield", []))
+            return _priority(d, "play_land", *([("cast", "Unflinching Hortimancer")] if out else [])) or d.pass_priority()
+        return _quiet(d)
+
+    def opp(d):
+        if d.kind == "priority":
+            st = d.raw["state"]
+            theirs = next(p for p in st["players"] if p["id"] != st.get("you"))
+            aim = any(c.get("name") == "Unflinching Hortimancer" for c in theirs.get("battlefield", []))
+            shots = [("cast", "Burst Lightning"), ("activate", "Fanatical Firebrand")] if aim else []
+            return _priority(d, "play_land", *shots, ("cast", "Fanatical Firebrand")) or d.pass_priority()
+        if d.kind == "target":
+            return _target(d, "Unflinching Hortimancer")
+        return _quiet(d)
+
+    human_seat, opp_seat = _scripted_game([str(DECKS / "ward-test.dck"), str(DECKS / "burn-test.dck")],
+                                          (human, opp), seed=5, turns=4)
+    bursts = _left_stack(human_seat, "Burst Lightning")
+    assert bursts and set(bursts) == {("GRAVEYARD", "countered", "Unflinching Hortimancer")}
+    countered = [m["event"] for m in human_seat.events if m["event"]["kind"] == "countered"]
+    assert [(human_seat.names.get(e["source_id"]), human_seat.names.get(e["by"]), e.get("copy")) for e in countered] \
+        == [("Fanatical Firebrand", "Unflinching Hortimancer", None)]
+    assert opp_seat.events == []

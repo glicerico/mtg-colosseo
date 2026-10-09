@@ -1,0 +1,4 @@
+# description: test fixture: a creature with ward {1} (Unflinching Hortimancer), so that spells and abilities an opponent aims at it are countered unless they pay
+NAME:Ward Test
+20 [FRA:281] Plains
+20 [FRA:23] Unflinching Hortimancer

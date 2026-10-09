@@ -149,6 +149,9 @@ final class EventFeed {
                 if (countered instanceof StackObject) {
                     o.addProperty("source_id", Json.str(((StackObject) countered).getSourceId()));
                 }
+                if (countered instanceof Spell) {
+                    o.addProperty("copy", true);
+                }
                 o.addProperty("by", Json.str(e.getSourceId()));
                 o.addProperty("player", Json.str(e.getPlayerId()));
                 break;

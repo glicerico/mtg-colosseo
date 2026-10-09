@@ -304,4 +304,4 @@ log lines there were when it happened: XMage writes the matching line just befor
 | `damage` | `target`, `source`, `amount`, `combat`, `to_player` |
 | `life` | `player`, `amount` (gained: positive, lost: negative), `source` |
 | `move` | `id`, `from`, `to` (zones: `HAND`, `LIBRARY`, `BATTLEFIELD`, `GRAVEYARD`, `EXILED`, `STACK`, `OUTSIDE`, ...), `owner`, `token`; a card this view saw neither before nor after the move (an opponent's draw) comes without `id` and with `hidden: true`. A spell leaving the stack also has `reason`: `resolved`, `countered` (then `by`, the counter's source) or `fizzled` (all its targets were illegal as it began to resolve); none when an effect moved it otherwise |
-| `countered` | an ability or a copy of a spell countered (a countered spell's `move` says so): `id`, `source_id`, `by` (the counter's source), `player` |
+| `countered` | an ability or a copy of a spell countered (a countered spell's `move` says so): `id`, `source_id`, `by` (the counter's source), `player`; `copy: true` for a copy of a spell |
