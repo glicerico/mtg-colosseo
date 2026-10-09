@@ -4,13 +4,16 @@ import mage.cards.CardsImpl;
 import mage.constants.Outcome;
 import mage.filter.FilterCard;
 import mage.game.Game;
+import mage.game.events.GameEvent;
 import mage.game.mulligan.LondonMulligan;
 import mage.players.Player;
 import mage.target.Target;
 import mage.target.common.TargetCardInHand;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -67,13 +70,60 @@ final class KeepFirstLondonMulligan extends LondonMulligan {
         return Math.max(0, player.getHand().size() - opening);
     }
 
+    /**
+     * {@link mage.game.mulligan.Mulligan#executeMulliganPhase} step for step, with one difference for keep-first
+     * players: the log says they keep before they put cards on the bottom, in the order they were asked (XMage logs
+     * the keep after {@link #endMulligan}, which asks for the bottom cards). {@link LondonMulligan}'s own version only
+     * sets up its bookkeeping, which this class keeps itself.
+     */
     @Override
     public void executeMulliganPhase(Game game, int startingHandSize) {
         for (UUID playerId : game.getState().getPlayerList(game.getStartingPlayerId())) {
             openingHandSizes.put(playerId, startingHandSize);
             startingHandSizes.put(playerId, startingHandSize);
         }
-        super.executeMulliganPhase(game, startingHandSize);
+        List<UUID> keepPlayers = new ArrayList<>();
+        List<UUID> mulliganPlayers = new ArrayList<>();
+        do {
+            mulliganPlayers.clear();
+            for (UUID playerId : game.getState().getPlayerList(game.getStartingPlayerId())) {
+                if (!keepPlayers.contains(playerId)) {
+                    Player player = game.getPlayer(playerId);
+                    boolean keep = true;
+                    while (true) {
+                        if (!canTakeMulligan(game, player)) {
+                            break;
+                        }
+                        GameEvent event = new GameEvent(GameEvent.EventType.CAN_TAKE_MULLIGAN, null, null, playerId);
+                        if (!game.replaceEvent(event)) {
+                            game.fireEvent(event);
+                            game.getState().setChoosingPlayerId(playerId);
+                            if (player.chooseMulligan(game)) {
+                                keep = false;
+                            }
+                            break;
+                        }
+                    }
+                    if (keep) {
+                        if (keepFirst.contains(playerId)) {
+                            game.informPlayers(player.getLogName() + " keeps hand");
+                            game.endMulligan(player.getId());
+                        } else {
+                            game.endMulligan(player.getId());
+                            game.informPlayers(player.getLogName() + " keeps hand");
+                        }
+                        keepPlayers.add(playerId);
+                    } else {
+                        mulliganPlayers.add(playerId);
+                        game.informPlayers(player.getLogName() + " decides to take mulligan");
+                    }
+                }
+            }
+            for (UUID mulliganPlayerId : mulliganPlayers) {
+                mulligan(game, mulliganPlayerId);
+            }
+            game.saveState(false);
+        } while (!mulliganPlayers.isEmpty());
     }
 
     @Override

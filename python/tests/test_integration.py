@@ -212,10 +212,15 @@ class _Mulligans(HeuristicAgent):
 
     def __init__(self, n):
         super().__init__()
-        self.n, self.taken, self.steps, self.opening = n, 0, [], None
+        self.n, self.taken, self.steps, self.opening, self.lines, self.me = n, 0, [], None, [], None
+
+    def on_event(self, message):
+        if message.get("type") == "log":
+            self.lines.append(message["entry"]["text"])
 
     def decide(self, d):
         st = d.raw.get("state") or {}
+        self.me = self.me or next((p["name"] for p in st.get("players", []) if p.get("id") == st.get("you")), None)
         hand = next((p["hand_count"] for p in st.get("players", []) if p.get("id") == st.get("you")), None)
         if d.kind == "mulligan":
             self.steps.append(("mulligan", hand, d.raw.get("bottom_on_keep")))
@@ -244,6 +249,12 @@ def _two_mulligans(seat_type):
     return agent
 
 
+def _keep_and_bottom(agent):
+    """Where the seat's "keeps hand" is in the log, and where each of its "puts a card ... on the bottom" lines is."""
+    keep = agent.lines.index(f"{agent.me} keeps hand")
+    return keep, [i for i, t in enumerate(agent.lines) if t == f"{agent.me} puts a card from hand to the bottom of their library"]
+
+
 def test_human_seats_keep_before_putting_cards_on_the_bottom():
     """London mulligan, as MTG Arena and MTGO ask it: a human seat decides keep-or-mulligan looking at seven new
     cards each time, and puts cards on the bottom only once it keeps (as many as mulligans taken)."""
@@ -251,6 +262,9 @@ def test_human_seats_keep_before_putting_cards_on_the_bottom():
     assert agent.steps == [("mulligan", 7, 0), ("mulligan", 7, 1), ("mulligan", 7, 2), ("bottom", 7, None),
                            ("bottom", 6, None)]
     assert agent.opening == 5
+    # the log tells it in the order it was asked: the keep, then the cards to the bottom
+    keep, bottom = _keep_and_bottom(agent)
+    assert len(bottom) == 2 and keep < min(bottom)
 
 
 def test_agent_seats_keep_the_xmage_mulligan_order():
@@ -260,6 +274,8 @@ def test_agent_seats_keep_the_xmage_mulligan_order():
     assert agent.steps == [("mulligan", 7, None), ("bottom", 7, None), ("mulligan", 6, None), ("bottom", 7, None),
                            ("bottom", 6, None), ("mulligan", 5, None)]
     assert agent.opening == 5
+    keep, bottom = _keep_and_bottom(agent)
+    assert len(bottom) == 3 and keep > max(bottom)  # XMage's log, as before
 
 
 class _Events(HeuristicAgent):
