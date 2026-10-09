@@ -37,14 +37,75 @@ const LAG_MS = 5000;
 const MIN_STEP_MS = 250;
 const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
 
-// what a log line about each kind of event says (XMage's wording)
-const LOG_WORDS = { cast: /\bcasts\b/, ability: /activat|ability/i, trigger: /\btriggers\b/, attack: /\battacks \S.* with \d+ creatures?$/,
-  block: /\bblocked by\b|\bblocks\b/, damage: /\bdamage\b|\bloses \d+ life\b/, life: /\blife\b/, countered: /\bcounter/,
-  move: /graveyard|battlefield|exile|hand|library|draws|creates|token|plays|sacrific/i };
+/**
+ * What a log line reports, from XMage's wording. Tested in this order: a trigger's or an activation's line quotes its
+ * rule text, which may say anything ("... dies, create ...").
+ */
+const LINE_KINDS = [
+  ['turn', /^TURN \d+ for /], ['trigger', / - Ability triggers: /], ['ability', / activates: /],
+  ['block', /^Attacker: .* blocked by /], ['other', /^Attacker: /], ['attack', / attacks .+ with \d+ creatures?$/],
+  ['countered', / is countered by /], ['fizzled', /has been fizzled/], ['other', / could not be countered /],
+  ['cast', / casts /], ['damage', / deals \d+ damage to | loses \d+ life/], ['life', / gains \d+ life/],
+  ['draw', / draws (a|an|\w+) (revealed )?cards?\b/],
+  ['move', / died\b| discards | sacrificed | is put into \w+ from | creates an? .* token| plays | moves .* to the exile zone| puts .* (from|into|onto) | (exiles|mills|returns) /],
+];
+const lineKind = (text) => (LINE_KINDS.find(([, re]) => re.test(text)) || ['other'])[0];
+// what a line about a card moving says of where it goes
+const TO_WORDS = { GRAVEYARD: /graveyard| died\b| discards | sacrificed | mills /, EXILED: /exile/, LIBRARY: /library/,
+  HAND: /into (their|its owner's) hand| returns /, BATTLEFIELD: /onto the Battlefield| plays | creates / };
+// how far from log_at an event's line may be: lines that name its object by id, by name only
+const ID_REACH = 8;
+const NAME_REACH = 4;
+
+/**
+ * The lines an event wants in the log (logLinesOf): for each, the kinds of line and a test of its text. A line names
+ * objects by their ids' first characters ("Cadet [ad4]"); the test looks for the event's own object where the line
+ * names its subject, not among the objects it mentions (its targets, "(source: ...)"). name(id) gives a player's or
+ * a card's name.
+ */
+function linesOf(ev, name) {
+  const names = (...ids) => (t) => ids.some((x) => x && t.includes(`[${x.slice(0, 3)}]`));
+  const before = (t, s) => (t.includes(s) ? t.slice(0, t.indexOf(s)) : t);
+  const after = (t, s) => (t.includes(s) ? t.slice(t.lastIndexOf(s)) : '');
+  const startsWith = (id) => (t) => { const n = id && name(id); return !!n && t.startsWith(`${n} `); };
+  // a card moving: "P1 discards Goblin Oriflamme [62f] (source: Seize the Spoils [6c0])", "X [73d] died by Y [64a]"
+  const subject = (t) => before(before(t, ' (source: '), ' died by ');
+  const byId = (kinds, test) => ({ kinds, test, reach: ID_REACH });
+  const byName = (kinds, test) => ({ kinds, test, reach: NAME_REACH });
+  switch (ev.kind) {
+    case 'cast': return [byId(['cast'], (t) => names(ev.card_id, ev.id)(before(t, ' targeting ')))];
+    case 'trigger': return [byId(['trigger'], (t) => names(ev.source_id)(before(after(t, 'Ability triggers: '), ' - ')))];
+    case 'ability': return [byId(['ability'], (t) => names(ev.source_id)(after(t, ' from ')))];
+    case 'attack': return [byName(['attack'], startsWith(ev.player))];
+    case 'block': return [byId(['block'], (t) => names(ev.blocker)(after(t, ' blocked by ')))];
+    case 'damage': // "Pia [b80] deals 3 damage to Corsair Captain [ac4]"; a player: "P0 loses 2 life at combat from Thopter Token [347]"
+      return [ev.to_player ? byId(['damage'], (t) => startsWith(ev.target)(t) && t.includes(` loses ${ev.amount} life`) && names(ev.source)(t))
+        : byId(['damage'], (t) => names(ev.target)(after(t, ' damage to ')))];
+    case 'life': { // "Opp gains 1 life (source: Authority of the Consuls [33c])", "Opp loses 1 life from Impact Tremors [235]"
+      const says = (t) => startsWith(ev.player)(t) && t.includes(ev.amount > 0 ? ` gains ${ev.amount} life` : ` loses ${-ev.amount} life`);
+      return [ev.source ? byId(['life', 'damage'], (t) => says(t) && names(ev.source)(t)) : byName(['life', 'damage'], says)];
+    }
+    case 'countered': return [byId(['countered'], (t) => names(ev.source_id, ev.id)(before(t, ' is countered by ')))];
+    case 'move': {
+      if (ev.from === 'LIBRARY' && ev.to === 'HAND') { // "Opp draws a card"; a search: "P puts X [1a2] from library into their hand"
+        return [byName(['draw', 'move'], (t, k) => (k === 'draw' ? startsWith(ev.owner)(t)
+          : names(ev.id)(subject(t)) && / from library /.test(t)))];
+      }
+      if (!ev.id) return [byName(['move'], startsWith(ev.owner))];
+      const to = TO_WORDS[ev.to];
+      const own = byId(['move'], (t) => names(ev.id)(subject(t)) && (!to || to.test(t)));
+      if (ev.from === 'STACK' && ev.reason === 'countered') return [own, byId(['countered'], (t) => names(ev.id)(before(t, ' is countered by ')))];
+      if (ev.from === 'STACK' && ev.reason === 'fizzled') return [own, byName(['fizzled'], startsWith(ev.id))];
+      return [own];
+    }
+    default: return [];
+  }
+}
 
 /** Which step an event belongs to: events the engine reports one by one but that are one action go together. */
 function stepKey(ev) {
   if (ev.kind === 'move' && ev.to === 'STACK') return 'to-stack'; // a card going to the stack: part of casting it
+  if (ev.kind === 'move' && ev.from === 'STACK' && ['countered', 'fizzled'].includes(ev.reason)) return 'countered';
   if (ev.kind === 'damage' || ev.kind === 'life') return 'hit';
   if (ev.kind === 'move' && ev.from === 'BATTLEFIELD' && ['GRAVEYARD', 'EXILED'].includes(ev.to)) return 'leave';
   if (ev.kind === 'move' && ev.from === 'LIBRARY' && ev.to === 'HAND') return 'draw';
@@ -126,6 +187,7 @@ export class GameView {
     this.pace = PACES[localStorage.getItem(PACE_KEY)] !== undefined ? localStorage.getItem(PACE_KEY) : 'normal';
     this.memberHost = new Map(); // id of a token shown in a stack -> id of the stack's card
     this.logByI = new Map(); // log line index -> {entry, el}
+    this.names = new Map(); // id -> name of each object a state showed: for those that have left it since
     this.keyHandler = (e) => this.onKey(e);
     document.addEventListener('keydown', this.keyHandler);
     this.resizeHandler = () => this.layout();
@@ -270,6 +332,7 @@ export class GameView {
           this.reveal = !!msg.reveal;
         }
         if (msg.state) this.state = msg.state;
+        this.learnNames(msg.state);
         this.queue = [];
         this.playing = false;
         clearTimeout(this.stepTimer);
@@ -520,7 +583,16 @@ export class GameView {
       }
     }
     const s = (this.state.stack || []).find((x) => x.id === id);
-    return s ? s.name : '?';
+    return s ? s.name : (this.names.get(id) || '?');
+  }
+
+  /** Remembers the names a state shows, so that an object that has left it can still be named (a dead attacker). */
+  learnNames(st) {
+    if (!st) return;
+    for (const p of st.players || []) {
+      for (const z of ['battlefield', 'graveyard', 'hand']) for (const c of p[z] || []) if (c.name && !c.hidden) this.names.set(c.id, c.name);
+    }
+    for (const c of [...(st.stack || []), ...(st.exile || [])]) if (c.name && !c.hidden) this.names.set(c.id, c.name);
   }
 
   render() {
@@ -890,7 +962,10 @@ export class GameView {
     let decided = false;
     let ended = false;
     for (const f of batch) {
-      if (f.state) this.state = f.state;
+      if (f.state) {
+        this.state = f.state;
+        this.learnNames(f.state);
+      }
       if (f.decision && !(this.sent && this.sent.decision_id === f.decision.decision_id)) {
         this.decision = f.decision;
         this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
@@ -929,7 +1004,8 @@ export class GameView {
     if (key === 'to-stack') ms = 0;
     if (!ms) return 0;
     ms = Math.max(MIN_STEP_MS, ms);
-    const name = (id) => this.nameIn(id, st) || this.nameIn(id, prev) || 'a card';
+    const known = (id) => this.nameIn(id, st) || this.nameIn(id, prev) || this.names.get(id) || null;
+    const name = (id) => known(id) || 'a card';
     const pname = (id) => (((st.players || []).find((p) => p.id === id) || {}).name) || '';
     const box = (id) => this.fx.rect(this.elementOf(id));
     const list = (ids) => ids.map(name).join(', ');
@@ -991,9 +1067,22 @@ export class GameView {
         else text = life.map((x) => `${pname(x.player)} ${x.amount > 0 ? 'gains' : 'loses'} ${Math.abs(x.amount)} life`).join(', ');
         break;
       }
-      case 'countered':
-        text = `${name(ev.id)} is countered`;
+      case 'countered': {
+        if (ev.kind === 'move') { // a spell countered or fizzled: its card leaves the stack
+          text = this.showMoves(shown, prev, before, ms, name, pname);
+          const at = this.fx.rect(this.el.stack);
+          if (at) this.fx.float(at, ev.reason === 'fizzled' ? 'Fizzled' : 'Countered', 'countered', ms);
+          break;
+        }
+        // an ability or a copy of a spell: nothing moves, it is just gone from the stack
+        const so = [...(prev.stack || []), ...(st.stack || [])].find((x) => x.id === ev.id);
+        const source = known(ev.source_id) || (so && so.source_name);
+        let what = source ? `${source}'s ability` : 'An ability';
+        if (so && so.kind !== 'ability') what = so.name;
+        text = `${what} is countered` + (ev.by ? ` by ${name(ev.by)}` : '');
+        this.fx.mark(this.elementOf(ev.source_id), 'fx-targeted', ms);
         break;
+      }
       default: // moves: leave, draw, move
         text = this.showMoves(shown, prev, before, ms, name, pname);
     }
@@ -1001,7 +1090,7 @@ export class GameView {
     // log lines arrive just before or after their event: link them once they are in
     clearTimeout(this.linkTimer);
     this.linkTimer = setTimeout(() => {
-      const lines = this.logLinesOf(events);
+      const lines = this.logLinesOf(events, known);
       this.markLog(lines);
       const cap = this.fx.layer.querySelector('.fx-caption');
       if (cap) for (const i of lines) cap.appendChild(h('button', { class: 'fx-log-link', title: 'Show this line in the log', onclick: (e) => { e.stopPropagation(); this.showLogLine(i); } }, `log ${i}`));
@@ -1011,7 +1100,13 @@ export class GameView {
 
   /** Cards moving between zones: each flies from where it was to where it goes. Returns the caption. */
   showMoves(moves, prev, before, ms, name, pname) {
-    const texts = [];
+    const texts = []; // the caption's phrases; a player's draws make one, written once all are known
+    const draws = new Map(); // owner -> the cards it draws in this step (null: a card the viewer doesn't see)
+    const drew = (owner) => {
+      const cards = draws.get(owner);
+      if (cards.length === 1) return `${pname(owner)} draws ${cards[0] || 'a card'}`;
+      return `${pname(owner)} draws ${cards.length <= 3 && cards.every(Boolean) ? cards.join(', ') : `${cards.length} cards`}`;
+    };
     for (const e of moves) {
       const owner = e.owner;
       const card = (e.id && (this.findCard(e.id, this.state) || this.findCard(e.id, prev))) || null;
@@ -1026,45 +1121,64 @@ export class GameView {
       }
       this.fx.ghost(card && !e.hidden ? this.fxCard(card) : cardBack(), from, to, ms);
       if (e.to === 'BATTLEFIELD' && toEl) this.fx.mark(toEl, 'fx-pop', ms);
-      if (e.from === 'LIBRARY' && e.to === 'HAND') texts.push(`${pname(owner)} draws ${what || 'a card'}`);
-      else if (e.from === 'HAND' && e.to === 'BATTLEFIELD') texts.push(`${pname(owner)} plays ${what || 'a card'}`);
-      else if (e.from === 'STACK' && e.to === 'BATTLEFIELD') texts.push(`${what} enters the battlefield`);
-      else if (e.from === 'STACK' && e.to === 'GRAVEYARD') texts.push(`${what} resolves → graveyard`);
-      else if (e.from === 'BATTLEFIELD' && e.to === 'GRAVEYARD') texts.push(`${what} → graveyard`);
-      else texts.push(`${what || 'A card'} → ${ZONE_NAMES[e.to] || (e.to || '').toLowerCase()}`);
+      const where = ZONE_NAMES[e.to] || (e.to || '').toLowerCase();
+      if (e.from === 'LIBRARY' && e.to === 'HAND') {
+        if (!draws.has(owner)) {
+          draws.set(owner, []);
+          texts.push(() => drew(owner));
+        }
+        draws.get(owner).push(what);
+      } else if (e.from === 'HAND' && e.to === 'BATTLEFIELD') texts.push(`${pname(owner)} plays ${what || 'a card'}`);
+      else if (e.from === 'STACK') texts.push(this.leftStack(e, what || 'A spell', where, name));
+      else if (e.from === 'BATTLEFIELD' && e.to === 'GRAVEYARD') texts.push(`${what || 'A card'} → graveyard`);
+      else texts.push(`${what || 'A card'} → ${where}`);
     }
-    const draws = texts.filter((t) => / draws a card$/.test(t));
-    if (draws.length > 1) return `${draws[0].replace(/ draws a card$/, '')} draws ${draws.length} cards`;
-    return texts.join(' · ');
+    return texts.map((t) => (typeof t === 'function' ? t() : t)).join(' · ');
   }
 
   /**
-   * The log lines a step's events name. XMage writes each line just before or just after its event (log_at): the
-   * nearest line that names one of the event's objects ("Cadet [dc9]": an id's first characters) and says what
-   * kind of thing happened; else the nearest that says it; else the line at log_at.
+   * What became of a spell leaving the stack, as the engine says (the move's reason): only a spell that resolved
+   * "resolves"; one countered says by what, one that fizzled says why. Without a reason, only where it went.
    */
-  logLinesOf(events) {
+  leftStack(e, what, where, name) {
+    switch (e.reason) {
+      case 'resolved': return e.to === 'BATTLEFIELD' ? `${what} enters the battlefield` : `${what} resolves → ${where}`;
+      case 'countered': return `${what} is countered${e.by ? ` by ${name(e.by)}` : ''} → ${where}`;
+      case 'fizzled': return `${what} fizzles: no legal target → ${where}`;
+      default: return `${what} → ${where}`;
+    }
+  }
+
+  /**
+   * The log lines of a step's events. XMage writes an event's line just before or just after it (log_at: the index
+   * the next line gets) and in its own words (LINE_KINDS). Each event links the nearest line of its kind that names
+   * its object, by the first characters of the object's id ("Cadet [ad4] died"), or by the player's or the card's
+   * name where XMage writes no id ("Opp draws a card", "Last Gasp has been fizzled."). A line about something else
+   * is never linked: an event whose line isn't found links none.
+   */
+  logLinesOf(events, name) {
     const out = new Set();
     for (const ev of events) {
       if (ev.log_at === undefined || stepKey(ev) === 'to-stack') continue;
-      const ids = [ev.id, ev.card_id, ev.source_id, ev.attacker, ev.blocker, ev.target, ev.source]
-        .filter(Boolean).map((x) => `[${x.slice(0, 3)}]`);
-      const words = LOG_WORDS[ev.kind] || /./;
-      // a trigger's line quotes its ability's text ("... attacks, that creature deals 1 damage ..."): only triggers match it
-      const says = { test: (t) => words.test(t) && (ev.kind === 'trigger' || !t.includes('Ability triggers')) };
-      const near = (ok) => {
-        let best = null;
-        for (let i = ev.log_at - 3; i <= ev.log_at + 3; i++) {
-          const l = this.logByI.get(i);
-          if (l && ok(l.entry.text) && (best === null || Math.abs(i - ev.log_at) < Math.abs(best - ev.log_at))) best = i;
-        }
-        return best;
-      };
-      const best = near((t) => says.test(t) && ids.some((x) => t.includes(x))) ?? near((t) => says.test(t))
-        ?? [ev.log_at, ev.log_at - 1].find((i) => this.logByI.has(i)) ?? null;
-      if (best !== null) out.add(best);
+      for (const want of linesOf(ev, name)) {
+        const i = this.nearestLine(ev.log_at, want);
+        if (i !== null) out.add(i);
+      }
     }
     return [...out].sort((a, b) => a - b);
+  }
+
+  /** The line nearest to log_at that is one of want.kinds and passes want.test: just after the event first. */
+  nearestLine(at, want) {
+    for (let d = 0; d < want.reach; d++) {
+      for (const i of [at + d, at - 1 - d]) {
+        const l = this.logByI.get(i);
+        if (!l) continue;
+        const kind = lineKind(l.entry.text);
+        if (want.kinds.includes(kind) && want.test(l.entry.text, kind)) return i;
+      }
+    }
+    return null;
   }
 
   /** Highlights the log lines of the step being shown (and scrolls to them when the log is at its end). */
