@@ -632,7 +632,8 @@ export class GameView {
     this.offBoard = [];
     // combat badges from the state
     for (const g of (this.state.combat && this.state.combat.groups) || []) {
-      for (const b of g.blockers || []) add(b, null, `blocks ${this.nameOf(g.attackers[0])}`);
+      // a blocker whose attacker has left combat (it died) is still blocking (506.4), with no attacker to name
+      for (const b of g.blockers || []) add(b, null, (g.attackers || []).length ? `blocks ${this.nameOf(g.attackers[0])}` : 'blocking');
       for (const a of g.attackers || []) if (g.blocked && !(g.blockers || []).length) add(a, null, 'blocked');
     }
     const d = this.decision;
@@ -1068,17 +1069,15 @@ export class GameView {
         break;
       }
       case 'countered': {
-        if (ev.kind === 'move') { // a spell countered or fizzled: its card leaves the stack
+        if (ev.kind === 'move') { // a spell countered or fizzled: its card leaves the stack, stamped
           text = this.showMoves(shown, prev, before, ms, name, pname);
-          const at = this.fx.rect(this.el.stack);
-          if (at) this.fx.float(at, ev.reason === 'fizzled' ? 'Fizzled' : 'Countered', 'countered', ms);
           break;
         }
         // an ability or a copy of a spell: nothing moves, it is just gone from the stack
         const so = [...(prev.stack || []), ...(st.stack || [])].find((x) => x.id === ev.id);
         const source = known(ev.source_id) || (so && so.source_name);
         let what = source ? `${source}'s ability` : 'An ability';
-        if (so && so.kind !== 'ability') what = so.name;
+        if (ev.copy) what = so ? `A copy of ${so.name}` : 'A copy of a spell';
         text = `${what} is countered` + (ev.by ? ` by ${name(ev.by)}` : '');
         this.fx.mark(this.elementOf(ev.source_id), 'fx-targeted', ms);
         break;
@@ -1119,7 +1118,11 @@ export class GameView {
         texts.push(`${what || 'A token'} is created`);
         continue;
       }
-      this.fx.ghost(card && !e.hidden ? this.fxCard(card) : cardBack(), from, to, ms);
+      const flying = card && !e.hidden ? this.fxCard(card) : cardBack();
+      if (e.from === 'STACK' && ['countered', 'fizzled'].includes(e.reason)) {
+        flying.appendChild(h('div', { class: 'fx-stamp' }, e.reason === 'fizzled' ? 'Fizzled' : 'Countered'));
+      }
+      this.fx.ghost(flying, from, to, ms);
       if (e.to === 'BATTLEFIELD' && toEl) this.fx.mark(toEl, 'fx-pop', ms);
       const where = ZONE_NAMES[e.to] || (e.to || '').toLowerCase();
       if (e.from === 'LIBRARY' && e.to === 'HAND') {

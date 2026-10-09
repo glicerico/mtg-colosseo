@@ -327,7 +327,11 @@ table.games td.actions .btn { margin-left: 4px; }
 .fx-float { position: absolute; transform: translate(-50%, -50%); font-weight: 900; font-size: calc(34px * var(--ui));
             text-shadow: 0 2px 8px #000, 0 0 3px #000; animation: fx-rise var(--fx-ms) ease-out forwards; white-space: nowrap; }
 .fx-float.fx-damage { color: #ff5a4f; } .fx-float.fx-gain { color: #5be38a; }
-.fx-float.fx-countered { color: #9cc4ff; font-size: calc(24px * var(--ui)); letter-spacing: .04em; }
+/* a countered or fizzled spell's card, as it leaves the stack */
+.fx-stamp { position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%) rotate(-14deg); z-index: 3;
+            padding: .15em .45em; border: max(2px, calc(var(--card-w) * .02)) solid #9cc4ff; border-radius: .3em;
+            background: rgba(10, 16, 28, .72); color: #cfe2ff; font-weight: 900; text-transform: uppercase;
+            letter-spacing: .06em; font-size: max(10px, calc(var(--card-w) * .13)); white-space: nowrap; }
 @keyframes fx-rise { 0% { opacity: 0; transform: translate(-50%, -20%) scale(.6); } 15% { opacity: 1; transform: translate(-50%, -60%) scale(1.15); }
                      80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -150%) scale(1); } }
 .fx-spotlight { position: absolute; top: 50%; right: min(calc(400px * var(--ui)), 34%); transform: translateY(-50%); display: flex;
