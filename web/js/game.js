@@ -586,7 +586,7 @@ export class GameView {
     return s ? s.name : (this.names.get(id) || '?');
   }
 
-  /** Remembers the names a state shows, so that an object that has left it can still be named (a dead attacker). */
+  /** Remembers the names a state shows, so that a caption can still name an object that has left it since. */
   learnNames(st) {
     if (!st) return;
     for (const p of st.players || []) {
@@ -1058,14 +1058,17 @@ export class GameView {
           this.fx.mark(this.elementOf(e.target), 'fx-hit', ms);
           if (!e.combat) this.fx.arrow(box(e.source), box(e.target), 'damage', ms);
         }
-        for (const e of shown.filter((x) => x.kind === 'life' && !damaged.has(x.player))) {
+        // life changes the damage doesn't account for: any gain, a loss of a player who wasn't dealt damage
+        const life = shown.filter((x) => x.kind === 'life' && !(x.amount < 0 && damaged.has(x.player)));
+        for (const e of life) {
           this.fx.float(box(e.player), e.amount > 0 ? `+${e.amount}` : `−${-e.amount}`, e.amount > 0 ? 'gain' : 'damage', ms);
         }
         const dmg = shown.filter((x) => x.kind === 'damage');
-        const life = shown.filter((x) => x.kind === 'life');
-        if (dmg.length && dmg.every((x) => x.combat)) text = `Combat damage: ${dmg.map((x) => `${name(x.source)} → ${name(x.target)} ${x.amount}`).join(', ')}`;
-        else if (dmg.length) text = dmg.map((x) => `${name(x.source)} deals ${x.amount} damage to ${name(x.target)}`).join(', ');
-        else text = life.map((x) => `${pname(x.player)} ${x.amount > 0 ? 'gains' : 'loses'} ${Math.abs(x.amount)} life`).join(', ');
+        const parts = [];
+        if (dmg.length && dmg.every((x) => x.combat)) parts.push(`Combat damage: ${dmg.map((x) => `${name(x.source)} → ${name(x.target)} ${x.amount}`).join(', ')}`);
+        else if (dmg.length) parts.push(dmg.map((x) => `${name(x.source)} deals ${x.amount} damage to ${name(x.target)}`).join(', '));
+        if (life.length) parts.push(life.map((x) => `${pname(x.player)} ${x.amount > 0 ? 'gains' : 'loses'} ${Math.abs(x.amount)} life`).join(', '));
+        text = parts.join(' · ');
         break;
       }
       case 'countered': {
