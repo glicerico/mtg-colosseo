@@ -7,7 +7,8 @@ Pegasus, and combat damage follows. The turn's messages arrive at once, as the e
 answers the block, what followed.
 
 Other stretches of live games, which the page only watches (fixtures/ui_<name>.json.gz): a spell countered, a spell
-that fizzles, deaths before the turn changes, discards.
+that fizzles, deaths before the turn changes, discards, cards searched for and revealed (from a seat and as a
+spectator).
 """
 import gzip
 import json
@@ -77,10 +78,10 @@ def new_page(browser, hello, size=(1600, 900)):
     return page
 
 
-def go(page, gid, pace):
+def go(page, gid, pace, seat=0):
     page.goto(BASE + "/")
     page.evaluate("p => { localStorage.setItem('colosseo.images', 'off'); localStorage.setItem('colosseo.pace', p); }", pace)
-    page.goto(f"{BASE}/#/game/{gid}/seat/0")
+    page.goto(f"{BASE}/#/game/{gid}/seat/{seat}" if seat >= 0 else f"{BASE}/#/watch/{gid}")
     page.reload()
 
 
@@ -213,8 +214,9 @@ def test_a_steps_log_link_shows_its_line_and_log_lines_ring_their_cards(browser)
     assert ring.all_inner_texts() == ["Semester Foreseer"]
 
 
-# every caption the page shows, with the log links it gets just after (window.__caps); the stamps on cards leaving
-# the stack (window.__stamps); the blockers' tags (window.__blocks)
+# every caption the page shows, with the log links it gets just after and what the step draws as it starts: the cards
+# shown large and the cards flying ("back": a card face down) (window.__caps); the stamps on cards leaving the stack
+# (window.__stamps); the blockers' tags (window.__blocks)
 CAPTIONS = """
   window.__caps = [];
   window.__stamps = [];
@@ -227,7 +229,8 @@ CAPTIONS = """
     if (n.classList.contains('fx-ghost') && n.querySelector('.fx-stamp')) {
       window.__stamps.push(n.querySelector('.fx-stamp').textContent);
     } else if (n.classList.contains('fx-caption')) {
-      const rec = { text: n.querySelector('span').textContent, links: [] };
+      const names = (sel) => [...document.querySelectorAll(sel)].map((c) => c.querySelector('.cf-name')?.textContent || 'back');
+      const rec = { text: n.querySelector('span').textContent, links: [], large: names('.fx-spotlight .card'), flying: names('.fx-ghost .card') };
       window.__caps.push(rec);
       n.__rec = rec;
     } else if (n.classList.contains('fx-log-link') && n.parentElement && n.parentElement.__rec) {
@@ -237,14 +240,14 @@ CAPTIONS = """
 """
 
 
-Replay = namedtuple("Replay", "steps log stamps blocks")
+Replay = namedtuple("Replay", "steps log stamps blocks drawn")
 
 
 def replay(browser, name):
     """The board watching a stretch of a live game (fixtures/ui_<name>.json.gz; see its "_source"): hello, then every
-    message the seat got, at once. Returns, once the steps are over: the steps it showed, [(caption, [log lines it
-    links])]; the log, {index: text}; the stamps on cards that left the stack countered or fizzled; the blockers'
-    tags it showed."""
+    message the seat (or the spectator) got, at once. Returns, once the steps are over: the steps it showed,
+    [(caption, [log lines it links])]; the log, {index: text}; the stamps on cards that left the stack countered or
+    fizzled; the blockers' tags it showed; what each step drew, {caption: (cards shown large, cards flying)}."""
     fx = json.loads(gzip.decompress((FIXTURES / f"ui_{name}.json.gz").read_bytes()))
     page = new_page(browser, fx["hello"])
     page.add_init_script(CAPTIONS)
@@ -254,16 +257,17 @@ def replay(browser, name):
             route.send(json.dumps(m))
 
     page.route_web_socket("**/ws/game/**", ws)
-    go(page, fx["hello"]["game_id"], "fast")
+    go(page, fx["hello"]["game_id"], "fast", fx["hello"]["seat"])
     page.wait_for_selector(".fx-caption")
     page.wait_for_function("() => document.querySelector('.skip-btn').classList.contains('hidden')", timeout=90000)
     page.wait_for_timeout(200)
-    steps = [(c["text"], c["links"]) for c in page.evaluate("() => window.__caps")]
+    caps = page.evaluate("() => window.__caps")
+    steps = [(c["text"], c["links"]) for c in caps]
     log = dict(page.evaluate("() => [...document.querySelectorAll('.log-line')].map((l) => [+l.dataset.i, l.textContent])"))
     stamps, blocks = page.evaluate("() => [window.__stamps, window.__blocks]")
     assert page.errors == []
     page.close()
-    return Replay(steps, log, stamps, blocks)
+    return Replay(steps, log, stamps, blocks, {c["text"]: (c["large"], c["flying"]) for c in caps})
 
 
 def name_alike(caption, line):
@@ -276,10 +280,10 @@ def test_a_countered_spell_is_shown_countered_never_as_resolving(browser):
     """A countered spell leaves the stack for its owner's graveyard, as a spell that resolved does: the engine says
     why (the move's reason), and the step says what the log says, linking both lines. Opp's Eardrum Rattler is
     countered by Human's Icy Reception, which itself resolves."""
-    steps, log, stamps, _ = replay(browser, "counter")
+    steps, log, stamps, *_ = replay(browser, "counter")
     assert steps == [
         ("Opp draws a card", [24]),
-        ("Opp plays Mountain", [25]),
+        ("Opp plays Mountain", [25, 26]),
         ("Opp casts Eardrum Rattler", [27]),
         ("Human casts Icy Reception → Eardrum Rattler", [28]),
         ("Eardrum Rattler is countered by Icy Reception → graveyard", [30, 31]),
@@ -293,10 +297,10 @@ def test_a_countered_spell_is_shown_countered_never_as_resolving(browser):
 def test_a_spell_that_fizzles_is_shown_fizzling_never_as_resolving(browser):
     """Opp's Last Gasp targets Human's Cryotheory Adept; Human returns the Adept to its hand with Unsummon, so Last
     Gasp has no legal target when it resolves, and fizzles (XMage counters it then): the step says so."""
-    steps, log, stamps, _ = replay(browser, "fizzle")
+    steps, log, stamps, *_ = replay(browser, "fizzle")
     assert steps == [
         ("Opp draws a card", [36]),
-        ("Opp plays Swamp", [37]),
+        ("Opp plays Swamp", [37, 38]),
         ("Opp casts Last Gasp → Cryotheory Adept", [39]),
         ("Human casts Unsummon → Cryotheory Adept", [40]),
         ("Cryotheory Adept triggers", [41]),
@@ -311,9 +315,9 @@ def test_a_spell_that_fizzles_is_shown_fizzling_never_as_resolving(browser):
 def test_deaths_link_their_own_lines_not_the_next_turns(browser):
     """Combat kills two creatures at the end of Opp's turn, then Human's turn begins with a draw: each death links its
     own "died" line, and the draw its own line."""
-    steps, log, _, _ = replay(browser, "deaths")
+    steps, log, *_ = replay(browser, "deaths")
     deaths = dict(steps)["Konstrari Improviser → graveyard · Cryotheory Adept → graveyard"]
-    assert [log[i] for i in deaths] == ["Konstrari Improviser [51b] died", "Cryotheory Adept [604] died"]
+    assert [log[i] for i in deaths] == ["Konstrari Improviser [fc3] died", "Cryotheory Adept [ed0] died"]
     assert log[deaths[-1] + 1].startswith("TURN 17 ")
     assert [log[i] for i in dict(steps)["Human draws Goblin Oriflamme"]] == ["Human draws a card"]
     assert all(links and all(name_alike(c, log[i]) for i in links) for c, links in steps), steps
@@ -322,17 +326,17 @@ def test_deaths_link_their_own_lines_not_the_next_turns(browser):
 def test_discards_draws_and_life_link_their_own_lines(browser):
     """Arc of Fortune: each player discards its hand and draws seven. Seize the Spoils: its discard is a cost, logged
     before the cast. Two Impact Tremors and Authority of the Consuls trigger together: a gain and two losses."""
-    steps, log, _, _ = replay(browser, "discards")
+    steps, log, *_ = replay(browser, "discards")
     linked = lambda caption: [log[i] for c, links in steps if c == caption for i in links]
-    assert linked("Germinate Recruits → graveyard") == ["Opp discards Germinate Recruits [297] (source: Arc of Fortune [ec3])"]
-    assert linked("Heartstring Puller → graveyard") == ["Human discards Heartstring Puller [333] (source: Arc of Fortune [ec3])"]
+    assert linked("Germinate Recruits → graveyard") == ["Opp discards Germinate Recruits [2f0] (source: Arc of Fortune [74a])"]
+    assert linked("Heartstring Puller → graveyard") == ["Human discards Heartstring Puller [b46] (source: Arc of Fortune [74a])"]
     assert linked("Opp draws 7 cards") == ["Opp draws seven cards"]
     assert linked("Human draws 7 cards") == ["Human draws seven cards"]
-    assert linked("Goblin Oriflamme → graveyard") == ["Human discards Goblin Oriflamme [234] (source: Seize the Spoils [d47])"]
-    assert linked("Human casts Seize the Spoils") == ["Human casts Seize the Spoils [d47] from hand"]
-    assert linked("Opp gains 1 life") == ["Opp gains 1 life (source: Authority of the Consuls [33c])"]
-    assert linked("Impact Tremors deals 1 damage to Opp") == ["Opp loses 1 life from Impact Tremors [235]",
-                                                             "Opp loses 1 life from Impact Tremors [17a]"]
+    assert linked("Goblin Oriflamme → graveyard") == ["Human discards Goblin Oriflamme [893] (source: Seize the Spoils [c14])"]
+    assert linked("Human casts Seize the Spoils") == ["Human casts Seize the Spoils [c14] from hand"]
+    assert linked("Opp gains 1 life") == ["Opp gains 1 life (source: Authority of the Consuls [24e])"]
+    assert linked("Impact Tremors deals 1 damage to Opp") == ["Opp loses 1 life from Impact Tremors [661]",
+                                                             "Opp loses 1 life from Impact Tremors [ff5]"]
     assert all(links and all(name_alike(c, log[i]) for i in links) for c, links in steps), steps
 
 
@@ -342,7 +346,7 @@ def test_a_blocker_whose_attacker_died_is_tagged_blocking(browser):
     "blocking". The death links its own line."""
     r = replay(browser, "combat")
     assert r.blocks == ["blocks Pia, Determined Rebuilder", "blocking"]
-    assert [r.log[i] for i in dict(r.steps)["Pia, Determined Rebuilder → graveyard"]] == ["Pia, Determined Rebuilder [293] died"]
+    assert [r.log[i] for i in dict(r.steps)["Pia, Determined Rebuilder → graveyard"]] == ["Pia, Determined Rebuilder [9fe] died"]
     assert all(links and all(name_alike(c, r.log[i]) for i in links) for c, links in r.steps), r.steps
 
 
@@ -350,11 +354,55 @@ def test_ward_counters_a_spell_and_an_ability_and_says_so(browser):
     """Opp aims two Burst Lightnings and then Fanatical Firebrand's ability at Unflinching Hortimancer, whose ward
     counters each one (Opp doesn't pay). A spell leaves the stack countered; an ability, which has no card to move,
     is countered in place: both are named with what countered them."""
-    steps, log, stamps, _ = replay(browser, "ward")
+    steps, log, stamps, *_ = replay(browser, "ward")
     assert [c for c, _ in steps].count("Burst Lightning is countered by Unflinching Hortimancer → graveyard") == 2
     assert stamps == ["Countered", "Countered"]
     ability = dict(steps)["Fanatical Firebrand's ability is countered by Unflinching Hortimancer"]
-    assert [log[i] for i in ability] == ["Ability ({T}, Sacrifice Fanatical Firebrand [be1]: It deals 1 damage to any target.) "
-                                         "of Fanatical Firebrand [be1] is countered by Unflinching Hortimancer [ba3]"]
+    assert [log[i] for i in ability] == ["Ability ({T}, Sacrifice Fanatical Firebrand [569]: It deals 1 damage to any target.) "
+                                         "of Fanatical Firebrand [569] is countered by Unflinching Hortimancer [1c8]"]
     assert not [c for c, _ in steps if "resolves" in c]
     assert all(links and all(name_alike(c, log[i]) for i in links) for c, links in steps), steps
+
+
+def test_a_search_is_not_a_draw_and_the_revealed_card_is_shown(browser):
+    """Basic landcycling (Apex Witchstalker: search for a basic land card, reveal it, put it into your hand), by Human
+    on turn 3 and by Opp on turn 4, seen from Human's seat. Only the turns' draws say "draws"; the engine says which
+    moves are draws (and which lands were played). A searched card says what XMage's line says and links it, though
+    that line names no card; the reveal that follows shows the card large and links its line. Opp's card is hidden
+    until then."""
+    r = replay(browser, "landcycle")
+    assert r.steps == [
+        ("Opp draws a card", [14]),
+        ("Opp plays Swamp", [15, 16]),
+        ("Human draws Swamp", [19]),
+        ("Human plays Swamp", [20, 21]),
+        ("Apex Witchstalker → graveyard", [22]),
+        ("Human activates Apex Witchstalker", [23]),
+        ("Human puts Swamp from library into hand", [25]),
+        ("Human reveals Swamp", [26]),
+        ("Opp draws a card", [30]),
+        ("Opp plays Swamp", [31, 32]),
+        ("Apex Witchstalker → graveyard", [33]),
+        ("Opp activates Apex Witchstalker", [34]),
+        ("Opp puts a card from library into hand", [36]),
+        ("Opp reveals Swamp", [37]),
+    ]
+    assert [r.log[i] for i in (19, 25, 26, 30, 36, 37)] == [
+        "Human draws a card", "Human puts a card from library into their hand", "Human reveals Swamp",
+        "Opp draws a card", "Opp puts a card from library into their hand", "Opp reveals Swamp"]
+    assert r.drawn["Human puts Swamp from library into hand"] == ([], ["Swamp"])
+    assert r.drawn["Opp puts a card from library into hand"] == ([], ["back"])
+    assert r.drawn["Human reveals Swamp"] == (["Swamp"], []) and r.drawn["Opp reveals Swamp"] == (["Swamp"], [])
+
+
+def test_a_spectator_sees_both_searches_as_searches(browser):
+    """The same turns, watched by a spectator, who sees neither hand: both searched cards fly face down and are named
+    once revealed; the draws stay draws."""
+    r = replay(browser, "landcycle_watch")
+    linked = dict(r.steps)
+    assert [c for c, _ in r.steps if "draws" in c] == ["Opp draws a card", "Human draws a card", "Opp draws a card"]
+    assert (linked["Human puts a card from library into hand"], linked["Human reveals Swamp"]) == ([25], [26])
+    assert (linked["Opp puts a card from library into hand"], linked["Opp reveals Swamp"]) == ([36], [37])
+    assert r.drawn["Human puts a card from library into hand"] == ([], ["back"])
+    assert r.drawn["Opp reveals Swamp"] == (["Swamp"], [])
+    assert all(links and all(name_alike(c, r.log[i]) for i in links) for c, links in r.steps), r.steps

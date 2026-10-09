@@ -160,7 +160,8 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
   power/toughness, keeps the hand in a stable order (new cards at the right end, highlighted for a moment), asks
   the London mulligan keep-first, and shows tokens' pictures. The opponent's actions are shown step by step: the
   card being cast and its targets, triggers and their source, attacks, blocks, damage, cards moving between
-  zones, each linked to its log line. The sidebar's Actions setting sets the pace (Slow, Normal, Fast, Off), and
+  zones (a draw, a land played or a spell resolving only when the engine says so), cards revealed, each linked to
+  its log line. The sidebar's Actions setting sets the pace (Slow, Normal, Fast, Off), and
   Skip or Esc shows the board as it is now. The data behind it (`explain`, `token_image`, `event` messages) is
   sent to browser views only; agents never get it (docs/protocol.md).
 - **Records**: `data/games/<id>.jsonl` pins the engine, XMage, deck and agent versions. A record holds both

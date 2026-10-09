@@ -28,7 +28,7 @@ const NEW_IN_HAND_MS = 2500;
 // the paces a player can choose, and how much faster the player's own actions go (they know what they did).
 // Steps that pile up go faster, so that the board is never more than about LAG_MS behind the game.
 const STEP_MS = { cast: 1300, trigger: 1100, ability: 1100, attack: 1000, block: 1000, hit: 800, countered: 900,
-  move: 700, leave: 800, draw: 350 };
+  move: 700, leave: 800, draw: 350, reveal: 1100 };
 const PACES = { slow: 1.6, normal: 1, fast: 0.5, off: 0 };
 const PACE_NAMES = { slow: 'Slow', normal: 'Normal', fast: 'Fast', off: 'Off' };
 const PACE_KEY = 'colosseo.pace';
@@ -36,6 +36,8 @@ const OWN_K = 0.35;
 const LAG_MS = 5000;
 const MIN_STEP_MS = 250;
 const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
+const REVEAL_CARDS = 4; // revealed cards a step shows large
+const REVEAL_NAMES = 5; // and names in its caption
 
 /**
  * What a log line reports, from XMage's wording. Tested in this order: a trigger's or an activation's line quotes its
@@ -46,7 +48,7 @@ const LINE_KINDS = [
   ['block', /^Attacker: .* blocked by /], ['other', /^Attacker: /], ['attack', / attacks .+ with \d+ creatures?$/],
   ['countered', / is countered by /], ['fizzled', /has been fizzled/], ['other', / could not be countered /],
   ['cast', / casts /], ['damage', / deals \d+ damage to | loses \d+ life/], ['life', / gains \d+ life/],
-  ['draw', / draws (a|an|\w+) (revealed )?cards?\b/],
+  ['draw', / draws (a|an|\w+) (revealed )?cards?\b/], ['reveal', / reveals /],
   ['move', / died\b| discards | sacrificed | is put into \w+ from | creates an? .* token| plays | moves .* to the exile zone| puts .* (from|into|onto) | (exiles|mills|returns) /],
 ];
 const lineKind = (text) => (LINE_KINDS.find(([, re]) => re.test(text)) || ['other'])[0];
@@ -87,17 +89,27 @@ function linesOf(ev, name) {
     }
     case 'countered': return [byId(['countered'], (t) => names(ev.source_id, ev.id)(before(t, ' is countered by ')))];
     case 'move': {
-      if (ev.from === 'LIBRARY' && ev.to === 'HAND') { // "Opp draws a card"; a search: "P puts X [1a2] from library into their hand"
-        return [byName(['draw', 'move'], (t, k) => (k === 'draw' ? startsWith(ev.owner)(t)
-          : names(ev.id)(subject(t)) && / from library /.test(t)))];
+      if (ev.from === 'LIBRARY' && ev.to === 'HAND') {
+        // drawn: "Opp draws a card", "Opp draws two cards"
+        if (ev.reason === 'draw') return [byName(['draw'], startsWith(ev.owner))];
+        // anything else (a search, landcycling): "P puts a card from library into their hand", which names no card
+        // (or "P puts Swamp [1a2] ...": then it must be this one), or "... into its owner's hand" when P isn't its owner
+        const named = (t) => /\[\w{3}\]/.test(before(t, ' from library'));
+        return [byName(['move'], (t) => (startsWith(ev.owner)(t) ? / from library into their hand/ : / from library into its owner's hand/).test(t)
+          && (!named(t) || !ev.id || names(ev.id)(subject(t))))];
       }
       if (!ev.id) return [byName(['move'], startsWith(ev.owner))];
       const to = TO_WORDS[ev.to];
       const own = byId(['move'], (t) => names(ev.id)(subject(t)) && (!to || to.test(t)));
       if (ev.from === 'STACK' && ev.reason === 'countered') return [own, byId(['countered'], (t) => names(ev.id)(before(t, ' is countered by ')))];
       if (ev.from === 'STACK' && ev.reason === 'fizzled') return [own, byName(['fizzled'], startsWith(ev.id))];
+      // played: "P puts Swamp [860] from hand onto the Battlefield", then "P plays Swamp [860]"
+      if (ev.reason === 'played') return [own, byId(['move'], (t) => / plays /.test(t) && names(ev.id)(t))];
       return [own];
     }
+    case 'reveal': // "P reveals Swamp, Island": cards are named, without ids
+      return [byName(['reveal'], (t) => startsWith(ev.player)(t)
+        && (ev.ids || []).every((id) => !name(id) || after(t, ' reveals ').includes(name(id))))];
     default: return [];
   }
 }
@@ -108,7 +120,7 @@ function stepKey(ev) {
   if (ev.kind === 'move' && ev.from === 'STACK' && ['countered', 'fizzled'].includes(ev.reason)) return 'countered';
   if (ev.kind === 'damage' || ev.kind === 'life') return 'hit';
   if (ev.kind === 'move' && ev.from === 'BATTLEFIELD' && ['GRAVEYARD', 'EXILED'].includes(ev.to)) return 'leave';
-  if (ev.kind === 'move' && ev.from === 'LIBRARY' && ev.to === 'HAND') return 'draw';
+  if (ev.kind === 'move' && ev.from === 'LIBRARY' && ev.to === 'HAND' && ev.reason === 'draw') return 'draw';
   return ev.kind;
 }
 
@@ -908,6 +920,12 @@ export class GameView {
       const url = so && imageUrl(so.kind === 'ability' ? (this.findCard(ev.source_id, frame.state) || so) : so);
       if (url) new Image().src = url;
     }
+    if (ev && ev.kind === 'reveal' && this.pace !== 'off') {
+      for (const id of (ev.ids || []).slice(0, REVEAL_CARDS)) {
+        const url = imageUrl(this.findCard(id, frame.state) || {});
+        if (url) new Image().src = url;
+      }
+    }
     if (this.pace === 'off' || (!this.playing && !this.queue.length && !frame.event)) {
       this.applyBatch([frame], false);
       return;
@@ -1085,6 +1103,17 @@ export class GameView {
         this.fx.mark(this.elementOf(ev.source_id), 'fx-targeted', ms);
         break;
       }
+      case 'reveal': { // the cards a player revealed, large: public now, whatever zone they are in
+        const cards = (ev.ids || []).map((id) => ({ ...(this.findCard(id, st) || { id, name: name(id) }), hidden: false }));
+        const names = cards.map((c) => c.name);
+        text = `${pname(ev.player)} reveals ${names.length <= REVEAL_NAMES ? names.join(', ')
+          : `${names.slice(0, REVEAL_NAMES - 1).join(', ')} and ${names.length - REVEAL_NAMES + 1} more`}`;
+        const row = h('div', { class: 'fx-reveal' }, ...cards.slice(0, REVEAL_CARDS).map((c) => this.fxCard(c)));
+        this.fx.spotlight(row, `${pname(ev.player)} reveals`, cards.length > REVEAL_CARDS ? `and ${cards.length - REVEAL_CARDS} more` : null,
+          ms, this.fx.rect(this.el.stack));
+        for (const id of ev.ids || []) this.fx.mark(this.elementOf(id), 'fx-targeted', ms);
+        break;
+      }
       default: // moves: leave, draw, move
         text = this.showMoves(shown, prev, before, ms, name, pname);
     }
@@ -1128,14 +1157,16 @@ export class GameView {
       this.fx.ghost(flying, from, to, ms);
       if (e.to === 'BATTLEFIELD' && toEl) this.fx.mark(toEl, 'fx-pop', ms);
       const where = ZONE_NAMES[e.to] || (e.to || '').toLowerCase();
-      if (e.from === 'LIBRARY' && e.to === 'HAND') {
+      if (e.from === 'LIBRARY' && e.to === 'HAND' && e.reason === 'draw') {
         if (!draws.has(owner)) {
           draws.set(owner, []);
           texts.push(() => drew(owner));
         }
         draws.get(owner).push(what);
-      } else if (e.from === 'HAND' && e.to === 'BATTLEFIELD') texts.push(`${pname(owner)} plays ${what || 'a card'}`);
-      else if (e.from === 'STACK') texts.push(this.leftStack(e, what || 'A spell', where, name));
+      } else if (e.from === 'LIBRARY' && e.to === 'HAND') texts.push(`${pname(owner)} puts ${what || 'a card'} from library into hand`);
+      else if (e.from === 'HAND' && e.to === 'BATTLEFIELD') {
+        texts.push(e.reason === 'played' ? `${pname(owner)} plays ${what || 'a card'}` : `${pname(owner)} puts ${what || 'a card'} onto the battlefield`);
+      } else if (e.from === 'STACK') texts.push(this.leftStack(e, what || 'A spell', where, name));
       else if (e.from === 'BATTLEFIELD' && e.to === 'GRAVEYARD') texts.push(`${what || 'A card'} → graveyard`);
       else texts.push(`${what || 'A card'} → ${where}`);
     }
@@ -1159,8 +1190,9 @@ export class GameView {
    * The log lines of a step's events. XMage writes an event's line just before or just after it (log_at: the index
    * the next line gets) and in its own words (LINE_KINDS). Each event links the nearest line of its kind that names
    * its object, by the first characters of the object's id ("Cadet [ad4] died"), or by the player's or the card's
-   * name where XMage writes no id ("Opp draws a card", "Last Gasp has been fizzled."). A line about something else
-   * is never linked: an event whose line isn't found links none.
+   * name where XMage writes no id ("Opp draws a card", "Opp puts a card from library into their hand", "Opp reveals
+   * Swamp", "Last Gasp has been fizzled."). A line about something else is never linked: an event whose line isn't
+   * found links none.
    */
   logLinesOf(events, name) {
     const out = new Set();
@@ -1242,7 +1274,8 @@ export class GameView {
         if (c) return c;
       }
     }
-    return (st.exile || []).find((x) => x.id === id) || (st.stack || []).find((x) => x.id === id || x.card_id === id) || null;
+    return (st.exile || []).find((x) => x.id === id) || (st.stack || []).find((x) => x.id === id || x.card_id === id)
+      || (st.revealed || []).flatMap((r) => r.cards || []).find((x) => x.id === id) || null;
   }
 
   nameIn(id, st) {
