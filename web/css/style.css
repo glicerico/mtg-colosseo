@@ -341,9 +341,10 @@ table.games td.actions .btn { margin-left: 4px; }
 .fx-spotlight { --spot-w: clamp(150px, calc(var(--card-w) * 1.5), 300px); }
 .fx-spotlight .card { --card-w: var(--spot-w); }
 /* cards a player revealed, side by side: smaller as there are more */
-.fx-reveal { display: flex; gap: 8px; justify-content: center; }
+.fx-reveal { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .fx-reveal:has(.card + .card) .card { --card-w: calc(var(--spot-w) * .62); }
 .fx-reveal:has(.card + .card + .card) .card { --card-w: calc(var(--spot-w) * .46); }
+.fx-reveal:has(.card + .card + .card + .card + .card) .card { --card-w: calc(var(--spot-w) * .4); }
 .fx-title { color: var(--gold); font-weight: 700; font-size: calc(14px * var(--ui)); text-align: center; }
 .fx-detail { color: var(--text); font-size: calc(12.5px * var(--ui)); max-width: calc(300px * var(--ui)); text-align: center; }
 @keyframes fx-in-out { 0% { opacity: 0; transform: translateY(-50%) scale(.85); } 12% { opacity: 1; transform: translateY(-50%) scale(1); }

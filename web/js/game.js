@@ -36,8 +36,7 @@ const OWN_K = 0.35;
 const LAG_MS = 5000;
 const MIN_STEP_MS = 250;
 const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
-const REVEAL_CARDS = 4; // revealed cards a step shows large
-const REVEAL_NAMES = 5; // and names in its caption
+const REVEAL_CARDS = 10; // revealed cards a step shows large and names (a whole hand); more are counted
 
 /**
  * What a log line reports, from XMage's wording. Tested in this order: a trigger's or an activation's line quotes its
@@ -1021,6 +1020,7 @@ export class GameView {
     const actor = ev.player || ev.owner;
     let ms = (STEP_MS[key] || STEP_MS.move) * PACES[this.pace] * this.catchUp() * (actor && actor === you ? OWN_K : 1);
     if (key === 'to-stack') ms = 0;
+    if (key === 'reveal') ms *= Math.min(2, 1 + 0.2 * ((ev.ids || []).length - 1)); // more cards, more time to see them
     if (!ms) return 0;
     ms = Math.max(MIN_STEP_MS, ms);
     const known = (id) => this.nameIn(id, st) || this.nameIn(id, prev) || this.names.get(id) || null;
@@ -1105,12 +1105,11 @@ export class GameView {
       }
       case 'reveal': { // the cards a player revealed, large: public now, whatever zone they are in
         const cards = (ev.ids || []).map((id) => ({ ...(this.findCard(id, st) || { id, name: name(id) }), hidden: false }));
-        const names = cards.map((c) => c.name);
-        text = `${pname(ev.player)} reveals ${names.length <= REVEAL_NAMES ? names.join(', ')
-          : `${names.slice(0, REVEAL_NAMES - 1).join(', ')} and ${names.length - REVEAL_NAMES + 1} more`}`;
-        const row = h('div', { class: 'fx-reveal' }, ...cards.slice(0, REVEAL_CARDS).map((c) => this.fxCard(c)));
-        this.fx.spotlight(row, `${pname(ev.player)} reveals`, cards.length > REVEAL_CARDS ? `and ${cards.length - REVEAL_CARDS} more` : null,
-          ms, this.fx.rect(this.el.stack));
+        const shown = cards.slice(0, REVEAL_CARDS);
+        const more = cards.length > shown.length ? ` and ${cards.length - shown.length} more` : '';
+        text = `${pname(ev.player)} reveals ${shown.map((c) => c.name).join(', ')}${more}`;
+        const row = h('div', { class: 'fx-reveal' }, ...shown.map((c) => this.fxCard(c)));
+        this.fx.spotlight(row, `${pname(ev.player)} reveals`, more ? more.trim() : null, ms, this.fx.rect(this.el.stack));
         for (const id of ev.ids || []) this.fx.mark(this.elementOf(id), 'fx-targeted', ms);
         break;
       }

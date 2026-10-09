@@ -406,3 +406,16 @@ def test_a_spectator_sees_both_searches_as_searches(browser):
     assert r.drawn["Human puts a card from library into hand"] == ([], ["back"])
     assert r.drawn["Opp reveals Swamp"] == (["Swamp"], [])
     assert all(links and all(name_alike(c, r.log[i]) for i in links) for c, links in r.steps), r.steps
+
+
+def test_a_revealed_hand_is_shown_whole(browser):
+    """Solve for Disappointment makes the other seat reveal its hand: Opp's seven cards on turn 3, Human's five on turn
+    4. Every card is shown large and named, as XMage's line names them, and the step links that line."""
+    r = replay(browser, "reveal")
+    opp = "Opp reveals Swamp, Swamp, Swamp, Swamp, Solve for Disappointment, Solve for Disappointment, Solve for Disappointment"
+    human = "Human reveals Swamp, Swamp, Solve for Disappointment, Solve for Disappointment, Solve for Disappointment"
+    linked = dict(r.steps)
+    assert [r.log[i] for i in linked[opp]] == [opp] and [r.log[i] for i in linked[human]] == [human]
+    assert r.drawn[opp] == (opp.split(" reveals ")[1].split(", "), [])
+    assert r.drawn[human] == (human.split(" reveals ")[1].split(", "), [])
+    assert all(links and all(name_alike(c, r.log[i]) for i in links) for c, links in r.steps), r.steps
