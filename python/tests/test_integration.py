@@ -326,20 +326,24 @@ def test_event_feed_reaches_browser_views_only():
 
 class _Scripted(_Events):
     """Plays by `rule` where it answers (else like the heuristic) and keeps the browser events it is sent, with the
-    names of the cards they name (from their states)."""
+    names of the cards they name (from their states), and the log."""
 
     def __init__(self, rule):
         super().__init__()
-        self.rule, self.names = rule, {}
+        self.rule, self.names, self.log = rule, {}, {}
 
     def on_event(self, message):
         super().on_event(message)
+        if message.get("type") == "log":
+            self.log[message["entry"]["i"]] = message["entry"]["text"]
         st = message.get("state") or {}
         for p in st.get("players", []):
             for zone in ("battlefield", "graveyard", "hand"):
                 self.names.update((c["id"], c.get("name")) for c in p.get(zone) or [])
         for s in st.get("stack") or []:
             self.names.update((k, s.get("name")) for k in (s["id"], s.get("card_id")) if k)
+        for r in st.get("revealed") or []:
+            self.names.update((c["id"], c.get("name")) for c in r.get("cards") or [])
 
     def decide(self, d):
         action = self.rule(d)
@@ -499,3 +503,38 @@ def test_ward_counters_are_sent_with_what_countered_them():
     assert [(human_seat.names.get(e["source_id"]), human_seat.names.get(e["by"]), e.get("copy")) for e in countered] \
         == [("Fanatical Firebrand", "Unflinching Hortimancer", None)]
     assert opp_seat.events == []
+
+
+def test_draws_land_plays_and_searches_say_what_they_are_and_reveals_are_sent():
+    """Each seat plays a Swamp, then cycles Apex Witchstalker (basic landcycling: search for a basic land card, reveal
+    it, put it into your hand). The browser view is told which cards going from library to hand were drawn (each
+    turn's draw: `reason: "draw"`) and which lands were played (`played`). The searched Swamp's move has no reason,
+    and its reveal comes as a `reveal` event naming the card, whoever searched; XMage's lines say the same."""
+    def cycler(d):
+        if d.kind == "priority":
+            return _priority(d, "play_land", ("activate", "Apex Witchstalker")) or d.pass_priority()
+        if d.kind == "target":
+            return _target(d, "Swamp")
+        return _quiet(d)
+
+    human_seat, opp_seat = _scripted_game([str(DECKS / "landcycle-test.dck")] * 2, (cycler, cycler), seed=3, turns=4)
+    assert opp_seat.events == []
+    events = [m["event"] for m in human_seat.events]
+    me = human_seat.events[0]["state"]["you"]
+    opp = next(p["id"] for p in human_seat.events[0]["state"]["players"] if p["id"] != me)
+    to_hand = [e for e in events if e["kind"] == "move" and e["from"] == "LIBRARY" and e["to"] == "HAND"]
+    # the draws of turns 2, 3 and 4 (the starting player skips its first)
+    assert [(e["owner"], e.get("reason")) for e in to_hand if e.get("reason")] == [(opp, "draw"), (me, "draw"), (opp, "draw")]
+    searched = [e for e in to_hand if not e.get("reason")]
+    assert [e["owner"] for e in searched] == [me, opp]
+    assert human_seat.names.get(searched[0]["id"]) == "Swamp" and "id" not in searched[1] and searched[1]["hidden"]
+    reveals = [e for e in events if e["kind"] == "reveal"]
+    assert [e["player"] for e in reveals] == [me, opp]
+    assert reveals[0]["ids"] == [searched[0]["id"]]  # the card we searched for
+    assert [[human_seat.names.get(i) for i in e["ids"]] for e in reveals] == [["Swamp"], ["Swamp"]]
+    for e in searched + reveals:  # their lines: XMage names no card when it puts one from library into a hand
+        near = [human_seat.log.get(i, "") for i in range(e["log_at"] - 1, e["log_at"] + 1)]
+        want = " puts a card from library into their hand" if e["kind"] == "move" else " reveals Swamp"
+        assert any(t.endswith(want) for t in near), (e, near)
+    played = [e for e in events if e["kind"] == "move" and e["from"] == "HAND" and e["to"] == "BATTLEFIELD"]
+    assert len(played) >= 4 and all(e.get("reason") == "played" for e in played)

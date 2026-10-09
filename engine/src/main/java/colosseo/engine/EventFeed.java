@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import mage.MageObject;
+import mage.abilities.PlayLandAbility;
 import mage.cards.Card;
 import mage.constants.Zone;
 import mage.game.Game;
@@ -19,6 +20,7 @@ import mage.game.stack.StackObject;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -26,9 +28,10 @@ import java.util.UUID;
 /**
  * The browser's account of what happens, one engine event at a time ({@code event} messages, browser views only):
  * spells cast and abilities activated or triggered, with their targets; attackers and blockers declared; damage and
- * life; cards moving between zones, and for a spell leaving the stack whether it resolved, was countered or fizzled;
- * abilities and copies of spells countered. XMage only reports state changes at priority rounds and
- * resolutions, so without this a browser never sees an opponent's spell on the stack, its targets or a trigger.
+ * life; cards moving between zones, with why where the engine says: a spell leaving the stack resolved, was countered
+ * or fizzled, a card going from library to hand was drawn, a land was played; abilities and copies of spells
+ * countered; cards a player reveals. XMage only reports state changes at priority rounds and resolutions, so without
+ * this a browser never sees an opponent's spell on the stack, its targets or a trigger.
  * <p>
  * Events name objects by id only; names and pictures come from the viewer's state sent with each event, so they are
  * masked exactly as the state is. A card moving between zones the viewer can't see (the opponent drawing) is sent
@@ -41,9 +44,11 @@ final class EventFeed {
             GameEvent.EventType.ATTACKER_DECLARED, GameEvent.EventType.BLOCKER_DECLARED,
             GameEvent.EventType.DAMAGED_PERMANENT, GameEvent.EventType.DAMAGED_PLAYER,
             GameEvent.EventType.GAINED_LIFE, GameEvent.EventType.LOST_LIFE,
-            GameEvent.EventType.ZONE_CHANGE, GameEvent.EventType.COUNTERED);
+            GameEvent.EventType.ZONE_CHANGE, GameEvent.EventType.COUNTERED, GameEvent.EventType.DRAW_CARD);
 
     private long seq;
+    /** a player drawing: nothing replaced their draw ({@link ObservedDuel#replaceEvent}), and no card has moved since */
+    private UUID drawing;
     /** per view (a seat, the spectators, the revealed spectators): the ids its last state showed */
     private final Map<String, Set<String>> lastVisible = new HashMap<>();
 
@@ -53,8 +58,14 @@ final class EventFeed {
      * XMage writes the line just before or just after the event.
      */
     JsonObject describe(Game game, GameEvent e, int logAt) {
+        UUID drawer = drawing;
+        drawing = null;
         JsonObject o = new JsonObject();
         switch (e.getType()) {
+            case DRAW_CARD:
+                // nothing replaced it: the card that moves next from this player's library to their hand is drawn
+                drawing = e.getPlayerId();
+                return null;
             case SPELL_CAST: {
                 Spell spell = spell(game, e);
                 if (spell == null) {
@@ -117,11 +128,12 @@ final class EventFeed {
                 if (z.getFromZone() == z.getToZone() || z.getToZone() == null) {
                     return null;
                 }
+                UUID owner = owner(game, z);
                 o.addProperty("kind", "move");
                 o.addProperty("id", Json.str(z.getTargetId()));
                 o.addProperty("from", zone(z.getFromZone()));
                 o.addProperty("to", zone(z.getToZone()));
-                o.addProperty("owner", Json.str(owner(game, z)));
+                o.addProperty("owner", Json.str(owner));
                 Permanent left = z.getTarget();
                 Permanent entered = game.getPermanent(z.getTargetId());
                 o.addProperty("token", left instanceof PermanentToken || entered instanceof PermanentToken);
@@ -134,6 +146,13 @@ final class EventFeed {
                             o.addProperty("by", Json.str(z.getSourceId()));
                         }
                     }
+                } else if (z.getFromZone() == Zone.LIBRARY && z.getToZone() == Zone.HAND && drawer != null
+                        && drawer.equals(owner)) {
+                    // drawn; any other card going from library to hand (a search, landcycling, ...) has no reason
+                    o.addProperty("reason", "draw");
+                } else if (z.getToZone() == Zone.BATTLEFIELD && z.getSource() instanceof PlayLandAbility) {
+                    // played; a land an effect puts onto the battlefield has no reason
+                    o.addProperty("reason", "played");
                 }
                 break;
             }
@@ -159,6 +178,20 @@ final class EventFeed {
             default:
                 return null;
         }
+        o.addProperty("seq", ++seq);
+        o.addProperty("log_at", logAt);
+        return o;
+    }
+
+    /**
+     * A player revealed cards ({@link ObservedDuel#informPlayers}): their ids, which every view may see now, like the
+     * cards themselves among the state's revealed cards.
+     */
+    JsonObject reveal(UUID playerId, List<UUID> cards, int logAt) {
+        JsonObject o = new JsonObject();
+        o.addProperty("kind", "reveal");
+        o.addProperty("player", Json.str(playerId));
+        o.add("ids", Json.ids(cards));
         o.addProperty("seq", ++seq);
         o.addProperty("log_at", logAt);
         return o;

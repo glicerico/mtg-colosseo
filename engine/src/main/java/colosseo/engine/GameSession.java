@@ -154,6 +154,11 @@ public final class GameSession {
                     }
 
                     @Override
+                    public void revealed(mage.game.Game g, UUID playerId, List<UUID> cards) {
+                        onReveal(g, playerId, cards);
+                    }
+
+                    @Override
                     public void bookmarked(int bookmark) {
                         markEvents(bookmark);
                     }
@@ -658,9 +663,40 @@ public final class GameSession {
      * happens without a browser view, before the first turn (the mulligans) or off the game thread.
      */
     private void onGameEvent(mage.game.Game g, mage.game.events.GameEvent e) {
-        if (g != game || !EventFeed.TYPES.contains(e.getType()) || Thread.currentThread() != thread
-                || game.getTurnStepType() == null) {
+        if (!EventFeed.TYPES.contains(e.getType())) {
             return;
+        }
+        List<Seat> views = feedViews(g);
+        if (views == null) {
+            return;
+        }
+        try {
+            sendEvent(feed.describe(game, e, log.size()), views);
+        } catch (RuntimeException ex) {
+            LOG.debug("event feed: " + e.getType(), ex); // the feed is only for the browsers' eyes: the game goes on
+        }
+    }
+
+    /** A player revealed cards ({@link ObservedDuel}): browser views are told, as of a game event. */
+    private void onReveal(mage.game.Game g, UUID playerId, List<UUID> cards) {
+        List<Seat> views = feedViews(g);
+        if (views == null) {
+            return;
+        }
+        try {
+            sendEvent(feed.reveal(playerId, cards, log.size()), views);
+        } catch (RuntimeException ex) {
+            LOG.debug("event feed: reveal", ex);
+        }
+    }
+
+    /**
+     * The seats with a browser view of the live game, when the event feed has anyone to tell (those seats or
+     * spectators); null when it hasn't, before the first turn (the mulligans) or off the game thread.
+     */
+    private List<Seat> feedViews(mage.game.Game g) {
+        if (g != game || Thread.currentThread() != thread || game.getTurnStepType() == null) {
+            return null;
         }
         List<Seat> views = new ArrayList<>();
         for (Seat seat : seats) {
@@ -668,34 +704,31 @@ public final class GameSession {
                 views.add(seat);
             }
         }
-        if (views.isEmpty() && spectators.isEmpty()) {
+        return views.isEmpty() && spectators.isEmpty() ? null : views;
+    }
+
+    /** Queues an event (if any) for each browser view, with the view's state right after it. */
+    private void sendEvent(JsonObject ev, List<Seat> views) {
+        if (ev == null) {
             return;
         }
-        try {
-            JsonObject ev = feed.describe(game, e, log.size());
-            if (ev == null) {
-                return;
-            }
-            for (Seat seat : views) {
-                JsonObject msg = feed.message(ev, StateView.build(game, seat.playerId, false, seatIndex, true), "seat" + seat.index);
-                queueEvent(() -> seat.broadcast(msg));
-            }
-            if (!spectators.isEmpty()) {
-                JsonObject normal = null;
-                JsonObject revealed = null;
-                for (Connection c : spectators) {
-                    if (c.revealAll && revealed == null) {
-                        revealed = feed.message(ev, StateView.build(game, null, true, seatIndex, true), "spectators-revealed");
-                    } else if (!c.revealAll && normal == null) {
-                        normal = feed.message(ev, StateView.build(game, null, false, seatIndex, true), "spectators");
-                    }
+        for (Seat seat : views) {
+            JsonObject msg = feed.message(ev, StateView.build(game, seat.playerId, false, seatIndex, true), "seat" + seat.index);
+            queueEvent(() -> seat.broadcast(msg));
+        }
+        if (!spectators.isEmpty()) {
+            JsonObject normal = null;
+            JsonObject revealed = null;
+            for (Connection c : spectators) {
+                if (c.revealAll && revealed == null) {
+                    revealed = feed.message(ev, StateView.build(game, null, true, seatIndex, true), "spectators-revealed");
+                } else if (!c.revealAll && normal == null) {
+                    normal = feed.message(ev, StateView.build(game, null, false, seatIndex, true), "spectators");
                 }
-                JsonObject r = revealed != null ? revealed : normal;
-                JsonObject n = normal != null ? normal : revealed;
-                queueEvent(() -> broadcastSpectators(r, n));
             }
-        } catch (RuntimeException ex) {
-            LOG.debug("event feed: " + e.getType(), ex); // the feed is only for the browsers' eyes: the game goes on
+            JsonObject r = revealed != null ? revealed : normal;
+            JsonObject n = normal != null ? normal : revealed;
+            queueEvent(() -> broadcastSpectators(r, n));
         }
     }
 
