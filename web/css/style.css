@@ -218,7 +218,10 @@ table.games td.actions .btn { margin-left: 4px; }
 
 /* cards usable from the graveyard or exile (design-zone-play.md): beside the hand, visibly apart from it; only
    cards with a known off-hand ability appear here, so a graveyard of plain creatures adds nothing. */
-.off-hand-row { display: flex; align-items: flex-end; flex: 0 0 auto; gap: 6px; padding: 0 10px; border-left: 1px dashed rgba(255,255,255,.18); min-width: 0; }
+/* Bounded and scrollable, not auto-sized: a big legal batch (e.g. a mass-flashback effect) must never be able
+   to shrink the normal hand row below a usable size, so it scrolls within its own share of the bar instead. */
+.off-hand-row { display: flex; align-items: flex-end; flex: 0 1 auto; max-width: 38%; gap: 6px; padding: 0 10px;
+  border-left: 1px dashed rgba(255,255,255,.18); min-width: 0; overflow-x: auto; overflow-y: hidden; flex-wrap: nowrap; }
 .off-hand-row.empty { display: none; }
 .off-hand-row.bottom .card { --card-w: calc(64px * var(--ui)); }
 .off-hand-row.top .card { --card-w: calc(38px * var(--ui)); }
@@ -318,7 +321,12 @@ table.games td.actions .btn { margin-left: 4px; }
    its reason shown as a small badge under it */
 .card.hinted { opacity: .55; }
 .card.hinted > .card-img, .card.hinted > .card-frame { box-shadow: 0 0 0 2px #8b949e; }
-.card.hinted .badge-state { background: #3a3220; border-color: #6a5a2a; color: #e3c878; }
+/* wraps within the card's own width instead of a single `nowrap` line stretching past it into whatever sits
+   beside it (the off-hand row's badge was getting covered by the hand once it ran past the card's edge); raised
+   above neighbouring cards so the wrapped lines are never painted under them. */
+.card.hinted .card-badges { z-index: 6; }
+.card.hinted .badge-state { background: #3a3220; border-color: #6a5a2a; color: #e3c878; white-space: normal;
+  max-width: calc(var(--card-w) * 1.4); line-height: 1.25; }
 .player-info.clickable { cursor: pointer; border-color: #d2a8ff; box-shadow: 0 0 12px rgba(210,168,255,.6); }
 .player-info.target-selected { border-color: #ff7b72; }
 

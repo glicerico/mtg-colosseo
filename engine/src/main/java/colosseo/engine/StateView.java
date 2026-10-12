@@ -27,6 +27,8 @@ import mage.game.permanent.PermanentToken;
 import mage.game.stack.Spell;
 import mage.game.stack.StackAbility;
 import mage.game.stack.StackObject;
+import mage.abilities.hint.HintUtils;
+import mage.players.Library;
 import mage.players.ManaPool;
 import mage.players.PlayableObjectsList;
 import mage.players.Player;
@@ -200,33 +202,55 @@ public final class StateView {
     }
 
     /**
-     * Cards in {@code player}'s own graveyard or exile that carry an ability usable from that zone (flashback,
-     * escape, a graveyard-return ability, "cast this turn" exile permissions, ...), for browser views of the
-     * player's own zones only (never an opponent's, never an agent's): {@code legal} true when the engine's own
-     * {@link Player#getPlayableObjects} already lists it (the same per-object legality {@code BridgePlayer} uses
-     * for the priority prompt, grouped by source id); otherwise a {@code hint} when the gating ability already carries an XMage
-     * {@link Hint} (e.g. Proctor of Potential's "scried or surveilled this turn"), the author's own text, never
-     * guessed from card text. A card with neither is left out, so a graveyard of plain creatures adds nothing.
+     * Cards usable from outside {@code player}'s hand, for browser views only (never an agent's): the player's
+     * own graveyard cards with an ability usable from there (flashback, escape, a graveyard-return ability, ...);
+     * any exile-zone card, of any owner, that the engine already lists as a legal play for this player (an
+     * impulse-draw or foretell-style "you may play this" grant is never owner-restricted in XMage, see
+     * {@code PlayerImpl.getPlayable}'s {@code Zone.EXILED} branch); and the top card of any in-range player's
+     * library when it is already a legal play for this player (the same {@code Zone.LIBRARY} branch) — a
+     * same-rank case to the exile one, never revealed unless the engine already allows playing it. {@code legal}
+     * is true when the engine's own {@link Player#getPlayableObjects} already lists the card (the same
+     * per-object legality {@code BridgePlayer} uses for the priority prompt, grouped by source id); for a
+     * not-yet-legal graveyard card, a {@code hint} when the gating ability already carries an XMage {@link Hint}
+     * (e.g. Proctor of Potential's "scried or surveilled this turn"), the author's own text with the Swing
+     * client's icon markup stripped, never guessed from card text. A card with neither is left out, so a
+     * graveyard of plain creatures adds nothing. Library/exile entries are only ever added when already legal,
+     * so nothing hidden is newly revealed.
      */
     private static JsonArray offHand(Game game, Player player) {
         // the same per-object legality XMage's own Swing client reads for its graveyard/exile highlighting
         // (PlayerPanelExt.isCardsPlayable, read from magefree/mage for design-zone-play.md)
         PlayableObjectsList playable = player.getPlayableObjects(game, Zone.ALL);
 
-        Map<UUID, Zone> candidates = new LinkedHashMap<>();
+        Map<UUID, Zone> candidateZones = new LinkedHashMap<>();
+        Map<UUID, Card> candidateCards = new LinkedHashMap<>();
         for (Card card : player.getGraveyard().getCards(game)) {
-            candidates.put(card.getId(), Zone.GRAVEYARD);
+            candidateZones.put(card.getId(), Zone.GRAVEYARD);
+            candidateCards.put(card.getId(), card);
         }
         for (ExileZone zone : game.getExile().getExileZones()) {
             for (Card card : zone.getCards(game)) {
-                if (card.getOwnerId().equals(player.getId())) {
-                    candidates.put(card.getId(), Zone.EXILED);
+                candidateZones.put(card.getId(), Zone.EXILED);
+                candidateCards.put(card.getId(), card);
+            }
+        }
+        for (UUID inRangeId : game.getState().getPlayersInRange(player.getId(), game)) {
+            Player inRange = game.getPlayer(inRangeId);
+            if (inRange == null) {
+                continue;
+            }
+            Library library = inRange.getLibrary();
+            if (library.hasCards()) {
+                Card top = library.getFromTop(game);
+                if (top != null && playable.containsObject(top.getId())) {
+                    candidateZones.put(top.getId(), Zone.LIBRARY);
+                    candidateCards.put(top.getId(), top);
                 }
             }
         }
 
         JsonArray result = new JsonArray();
-        for (Map.Entry<UUID, Zone> e : candidates.entrySet()) {
+        for (Map.Entry<UUID, Zone> e : candidateZones.entrySet()) {
             UUID cardId = e.getKey();
             Zone zone = e.getValue();
             boolean legal = playable.containsObject(cardId);
@@ -241,6 +265,10 @@ public final class StateView {
             if (hint != null) {
                 o.addProperty("hint", hint);
             }
+            // the full card view, not just an id: a library-top or another player's exiled card is never in any
+            // zone array this viewer's own state already carries (graveyard/exile there are owner-filtered, and
+            // libraries are never serialized at all), so the client has nothing else to look the card up by.
+            o.add("card", card(game, candidateCards.get(cardId)));
             result.add(o);
         }
         return result;
@@ -261,13 +289,48 @@ public final class StateView {
                 continue;
             }
             for (Hint hint : ability.getHints()) {
-                String text = hint.getText(game, ability);
+                String text = cleanHintText(hint.getText(game, ability));
                 if (text != null && !text.isEmpty()) {
                     return text;
                 }
             }
         }
         return null;
+    }
+
+    /**
+     * {@link Hint#getText} bakes the Swing client's own icon/colour markup directly into the string with no
+     * delimiter (e.g. {@code "ICON_BADYou've scried or surveilled this turn"}, see {@code HintUtils.prepareText}):
+     * a literal {@code HintUtils.HINT_ICON_GOOD}/{@code HINT_ICON_BAD} prefix, maybe a {@code <font color=...>}
+     * wrapper, maybe {@code HintUtils.HINT_START_MARK}. Strips those for the browser, which has no such markup,
+     * and turns the "false" branch (the gating condition not yet met) into a plain "needs: ..." sentence instead
+     * of leaving the reader to infer it from which icon used to be there.
+     */
+    private static String cleanHintText(String text) {
+        if (text == null) {
+            return null;
+        }
+        boolean unmet = text.startsWith(HintUtils.HINT_ICON_BAD);
+        for (String icon : new String[]{
+                HintUtils.HINT_ICON_GOOD, HintUtils.HINT_ICON_BAD,
+                HintUtils.HINT_ICON_RESTRICT, HintUtils.HINT_ICON_REQUIRE,
+        }) {
+            if (text.startsWith(icon)) {
+                text = text.substring(icon.length());
+                break;
+            }
+        }
+        text = text.replace(HintUtils.HINT_START_MARK, "");
+        text = text.replaceAll("</?font[^>]*>", "");
+        text = text.trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        if (unmet) {
+            char first = Character.toLowerCase(text.charAt(0));
+            text = "needs: " + first + text.substring(1);
+        }
+        return text;
     }
 
     /**

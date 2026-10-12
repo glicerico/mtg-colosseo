@@ -738,12 +738,14 @@ export class GameView {
     return ids;
   }
 
-  /** This player's own graveyard/exile cards that have a known off-hand ability, for the row beside their hand. */
+  /**
+   * Cards this player can play from outside their hand (own graveyard, any exile, any library top), for the row
+   * beside their hand. Each entry carries its own card view from the engine (`off_hand[].card`): a library-top or
+   * another player's exiled card is never in a zone array this viewer's own state already has (graveyard/exile
+   * there are owner-filtered, libraries aren't serialized at all), so there's nothing else to look it up by.
+   */
   offHandCards(p) {
-    const list = p.off_hand || [];
-    if (!list.length) return [];
-    const byId = new Map([...(p.graveyard || []), ...this.exileOf(p)].map((c) => [c.id, c]));
-    return list.map((o) => byId.get(o.card_id)).filter(Boolean);
+    return (p.off_hand || []).map((o) => o.card).filter(Boolean);
   }
 
   cardEl(card) {
@@ -1702,8 +1704,18 @@ export class GameView {
    * the hand (design-zone-play.md, criterion 3).
    */
   showZone(title, cards) {
+    // a fresh cache, not `this.cache`: that one is keyed by card id and shared with the live board (the off-hand
+    // row, the hand, ...), so reusing it here would hand the modal the same DOM node currently sitting in the
+    // row beside the hand and pull it out of the board when the modal opens (and leave it missing after close).
+    const cache = new Map();
     const body = h('div', { class: 'zone-view' },
-      cards.length ? cards.map((c) => this.cardEl(c)) : h('p', { class: 'muted' }, 'Empty'));
+      cards.length ? cards.map((c) => {
+        const x = this.extras.get(c.id) || {};
+        const el = renderCard(cache, c, x);
+        el.classList.remove('attached', 'foreign');
+        if (this.clickable.has(c.id)) el.classList.add('clickable');
+        return el;
+      }) : h('p', { class: 'muted' }, 'Empty'));
     body.addEventListener('click', (ev) => this.onBoardClick(ev));
     modal(title, body, [], { wide: true });
   }
