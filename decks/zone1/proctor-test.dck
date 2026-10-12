@@ -1,0 +1,14 @@
+# description: test fixture for zone-1-play: Proctor of Potential's graveyard ability (scry/surveil gated), a
+#   flashback menu (Think Twice plus Past in Flames's granted flashback, two options on one source), and a
+#   foretell card castable from exile. High land count and several copies of each spell so a scripted game reaches
+#   them quickly regardless of the shuffle.
+NAME:Zone 1 Play Test
+9 [FRA:281] Plains
+9 [FRA:283] Island
+8 [FRA:287] Mountain
+4 [FRA:145] Proctor of Potential
+2 [AER:98] Shock
+2 [DOM:60] Opt
+2 [ISD:83] Think Twice
+2 [ISD:155] Past in Flames
+2 [KHM:76] Saw It Coming
