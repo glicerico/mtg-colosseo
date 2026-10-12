@@ -234,6 +234,7 @@ export class GameView {
     // planeswalkers, ...) side by side; then the player and the hand
     this.el = {
       topInfo: h('div', { class: 'player-info top' }),
+      topOffHand: h('div', { class: 'off-hand-row top empty' }),
       topHand: h('div', { class: 'hand-row top' }),
       topLands: h('div', { class: 'zone lands', title: 'Lands' }),
       topOthers: h('div', { class: 'zone others', title: 'Other permanents' }),
@@ -245,6 +246,7 @@ export class GameView {
       botLands: h('div', { class: 'zone lands', title: 'Lands' }),
       botOthers: h('div', { class: 'zone others', title: 'Other permanents' }),
       botInfo: h('div', { class: 'player-info bottom' }),
+      botOffHand: h('div', { class: 'off-hand-row bottom empty' }),
       botHand: h('div', { class: 'hand-row bottom' }),
       prompt: h('div', { class: 'prompt-bar' }),
       header: h('div', { class: 'side-header' }),
@@ -254,8 +256,8 @@ export class GameView {
     const e = this.el;
     e.topPerm = h('div', { class: 'perm-row' }, e.topLands, e.topOthers);
     e.botPerm = h('div', { class: 'perm-row' }, e.botLands, e.botOthers);
-    e.topInfoHand = h('div', { class: 'info-hand' }, e.topInfo, e.topHand);
-    e.botInfoHand = h('div', { class: 'info-hand' }, e.botInfo, e.botHand);
+    e.topInfoHand = h('div', { class: 'info-hand' }, e.topInfo, e.topOffHand, e.topHand);
+    e.botInfoHand = h('div', { class: 'info-hand' }, e.botInfo, e.botOffHand, e.botHand);
     e.topSide = h('div', { class: 'side top' }, e.topInfoHand, h('div', { class: 'field' }, e.topPerm, e.topCreatures));
     e.botSide = h('div', { class: 'side bottom' }, h('div', { class: 'field' }, e.botCreatures, e.botPerm), e.botInfoHand);
     e.middle = h('div', { class: 'middle' }, e.phase, h('div', { class: 'middle-row' }, e.center, e.stack));
@@ -641,6 +643,13 @@ export class GameView {
     };
     this.clickable = new Map();
     this.offBoard = [];
+    // a graveyard/exile card with a known gating ability not yet legal (design-zone-play.md): the engine's own
+    // hint text, shown whenever relevant, not only while it's this viewer's priority
+    for (const p of this.state.players || []) {
+      for (const o of p.off_hand || []) {
+        if (!o.legal && o.hint) add(o.card_id, 'hinted', o.hint);
+      }
+    }
     // combat badges from the state
     for (const g of (this.state.combat && this.state.combat.groups) || []) {
       // a blocker whose attacker has left combat (it died) is still blocking (506.4), with no attacker to name
@@ -721,9 +730,20 @@ export class GameView {
       ids.add(p.id);
       for (const c of p.battlefield || []) ids.add(c.id);
       for (const c of p.hand || []) ids.add(c.id);
+      // a graveyard/exile card the engine already lists a legal action for (design-zone-play.md): treated like a
+      // hand card, so it glows and answers the same way, from the same priority/target options as any other.
+      for (const o of p.off_hand || []) if (o.legal) ids.add(o.card_id);
     }
     for (const s of this.state.stack || []) ids.add(s.id);
     return ids;
+  }
+
+  /** This player's own graveyard/exile cards that have a known off-hand ability, for the row beside their hand. */
+  offHandCards(p) {
+    const list = p.off_hand || [];
+    if (!list.length) return [];
+    const byId = new Map([...(p.graveyard || []), ...this.exileOf(p)].map((c) => [c.id, c]));
+    return list.map((o) => byId.get(o.card_id)).filter(Boolean);
   }
 
   cardEl(card) {
@@ -769,6 +789,12 @@ export class GameView {
             `☄ ${this.exileOf(p).length}`) : null),
         pool.length ? h('div', { class: 'pool' }, 'pool ', pool.map(([k, n]) => manaSymbols(`{${k}}`.repeat(n)))) : null,
         counters.length ? h('div', { class: 'pcounters' }, counters.map(([k, n]) => `${k}: ${n}`).join(', ')) : null));
+
+    // graveyard/exile cards with a known off-hand ability, beside the hand (design-zone-play.md)
+    const offHandEl = where === 'top' ? e.topOffHand : e.botOffHand;
+    const offHand = this.offHandCards(p);
+    offHandEl.classList.toggle('empty', !offHand.length);
+    this.renderZone(offHandEl, offHand);
 
     // hand
     if (p.hand) {
@@ -1669,9 +1695,17 @@ export class GameView {
     setTimeout(() => document.addEventListener('mousedown', close), 0);
   }
 
+  /**
+   * The graveyard/exile window: every card in the zone, display-only except the ones the engine already lists
+   * a legal action for (glowing, clickable) or carries a hint for (dimmed, with its reason) — the same
+   * `extras`/`clickable` state the board itself uses, since these cards may also be the same ones shown beside
+   * the hand (design-zone-play.md, criterion 3).
+   */
   showZone(title, cards) {
-    const cache = new Map();
-    modal(title, h('div', { class: 'zone-view' }, cards.length ? cards.map((c) => renderCard(cache, c)) : h('p', { class: 'muted' }, 'Empty')), [], { wide: true });
+    const body = h('div', { class: 'zone-view' },
+      cards.length ? cards.map((c) => this.cardEl(c)) : h('p', { class: 'muted' }, 'Empty'));
+    body.addEventListener('click', (ev) => this.onBoardClick(ev));
+    modal(title, body, [], { wide: true });
   }
 
   // --- dialogs ------------------------------------------------------------------------------------

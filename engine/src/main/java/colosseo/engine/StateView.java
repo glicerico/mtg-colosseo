@@ -4,7 +4,9 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import mage.MageObject;
 import mage.abilities.Ability;
+import mage.abilities.ActivatedAbility;
 import mage.abilities.Mode;
+import mage.abilities.hint.Hint;
 import mage.cards.Card;
 import mage.cards.Cards;
 import mage.cards.repository.TokenInfo;
@@ -26,10 +28,12 @@ import mage.game.stack.Spell;
 import mage.game.stack.StackAbility;
 import mage.game.stack.StackObject;
 import mage.players.ManaPool;
+import mage.players.PlayableObjectsList;
 import mage.players.Player;
 import mage.target.Target;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -168,6 +172,9 @@ public final class StateView {
             p.add("hand", cards(game, player.getHand().getCards(game)));
         }
         p.add("graveyard", cards(game, player.getGraveyard().getCards(game)));
+        if (explainer != null && seesHand) {
+            p.add("off_hand", offHand(game, player));
+        }
 
         JsonArray battlefield = new JsonArray();
         for (Permanent perm : game.getBattlefield().getAllPermanents()) {
@@ -190,6 +197,77 @@ public final class StateView {
         }
         p.add("battlefield", battlefield);
         return p;
+    }
+
+    /**
+     * Cards in {@code player}'s own graveyard or exile that carry an ability usable from that zone (flashback,
+     * escape, a graveyard-return ability, "cast this turn" exile permissions, ...), for browser views of the
+     * player's own zones only (never an opponent's, never an agent's): {@code legal} true when the engine's own
+     * {@link Player#getPlayableObjects} already lists it (the same per-object legality {@code BridgePlayer} uses
+     * for the priority prompt, grouped by source id); otherwise a {@code hint} when the gating ability already carries an XMage
+     * {@link Hint} (e.g. Proctor of Potential's "scried or surveilled this turn"), the author's own text, never
+     * guessed from card text. A card with neither is left out, so a graveyard of plain creatures adds nothing.
+     */
+    private static JsonArray offHand(Game game, Player player) {
+        // the same per-object legality XMage's own Swing client reads for its graveyard/exile highlighting
+        // (PlayerPanelExt.isCardsPlayable, read from magefree/mage for design-zone-play.md)
+        PlayableObjectsList playable = player.getPlayableObjects(game, Zone.ALL);
+
+        Map<UUID, Zone> candidates = new LinkedHashMap<>();
+        for (Card card : player.getGraveyard().getCards(game)) {
+            candidates.put(card.getId(), Zone.GRAVEYARD);
+        }
+        for (ExileZone zone : game.getExile().getExileZones()) {
+            for (Card card : zone.getCards(game)) {
+                if (card.getOwnerId().equals(player.getId())) {
+                    candidates.put(card.getId(), Zone.EXILED);
+                }
+            }
+        }
+
+        JsonArray result = new JsonArray();
+        for (Map.Entry<UUID, Zone> e : candidates.entrySet()) {
+            UUID cardId = e.getKey();
+            Zone zone = e.getValue();
+            boolean legal = playable.containsObject(cardId);
+            String hint = legal ? null : hintFor(game, cardId, zone);
+            if (!legal && hint == null) {
+                continue;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("card_id", Json.str(cardId));
+            o.addProperty("zone", zone.name());
+            o.addProperty("legal", legal);
+            if (hint != null) {
+                o.addProperty("hint", hint);
+            }
+            result.add(o);
+        }
+        return result;
+    }
+
+    /**
+     * The text of the first XMage {@link Hint} attached to an ability of {@code cardId} usable from {@code zone},
+     * when one exists: the author's own explanation of the gating condition, read independently of whether the
+     * ability is currently legal.
+     */
+    private static String hintFor(Game game, UUID cardId, Zone zone) {
+        Card card = game.getCard(cardId);
+        if (card == null) {
+            return null;
+        }
+        for (Ability ability : card.getAbilities(game)) {
+            if (!(ability instanceof ActivatedAbility) || ability.getZone() != zone) {
+                continue;
+            }
+            for (Hint hint : ability.getHints()) {
+                String text = hint.getText(game, ability);
+                if (text != null && !text.isEmpty()) {
+                    return text;
+                }
+            }
+        }
+        return null;
     }
 
     /**

@@ -216,6 +216,13 @@ table.games td.actions .btn { margin-left: 4px; }
 .hand-row.top .card { margin-left: calc(-14px * var(--ui)); }
 .hand-row.top .card:first-child { margin-left: 0; }
 
+/* cards usable from the graveyard or exile (design-zone-play.md): beside the hand, visibly apart from it; only
+   cards with a known off-hand ability appear here, so a graveyard of plain creatures adds nothing. */
+.off-hand-row { display: flex; align-items: flex-end; flex: 0 0 auto; gap: 6px; padding: 0 10px; border-left: 1px dashed rgba(255,255,255,.18); min-width: 0; }
+.off-hand-row.empty { display: none; }
+.off-hand-row .card { --card-w: calc(var(--hw, var(--card-w)) * .82); }
+.off-hand-row.top .card { --card-w: calc(46px * var(--ui) * .82); }
+
 /* ---------- cards ---------- */
 .card {
   position: relative; width: var(--card-w); height: calc(var(--card-w) * 1.395); flex: 0 0 auto;
@@ -307,6 +314,11 @@ table.games td.actions .btn { margin-left: 4px; }
 .card.blk-pending > .card-img, .card.blk-pending > .card-frame { box-shadow: 0 0 0 3px #fff, 0 0 18px rgba(255,255,255,.9); }
 .card.enemy-attacker > .card-img, .card.enemy-attacker > .card-frame { box-shadow: 0 0 0 2px var(--red); }
 .card.clickable:hover { filter: brightness(1.12); }
+/* a graveyard/exile card with a known gating condition that isn't met yet (design-zone-play.md): dim, not clickable,
+   its reason shown as a small badge under it */
+.card.hinted { opacity: .55; }
+.card.hinted > .card-img, .card.hinted > .card-frame { box-shadow: 0 0 0 2px #8b949e; }
+.card.hinted .badge-state { background: #3a3220; border-color: #6a5a2a; color: #e3c878; }
 .player-info.clickable { cursor: pointer; border-color: #d2a8ff; box-shadow: 0 0 12px rgba(210,168,255,.6); }
 .player-info.target-selected { border-color: #ff7b72; }
 
