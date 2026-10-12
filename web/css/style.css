@@ -220,8 +220,8 @@ table.games td.actions .btn { margin-left: 4px; }
    cards with a known off-hand ability appear here, so a graveyard of plain creatures adds nothing. */
 .off-hand-row { display: flex; align-items: flex-end; flex: 0 0 auto; gap: 6px; padding: 0 10px; border-left: 1px dashed rgba(255,255,255,.18); min-width: 0; }
 .off-hand-row.empty { display: none; }
-.off-hand-row .card { --card-w: calc(var(--hw, var(--card-w)) * .82); }
-.off-hand-row.top .card { --card-w: calc(46px * var(--ui) * .82); }
+.off-hand-row.bottom .card { --card-w: calc(64px * var(--ui)); }
+.off-hand-row.top .card { --card-w: calc(38px * var(--ui)); }
 
 /* ---------- cards ---------- */
 .card {
