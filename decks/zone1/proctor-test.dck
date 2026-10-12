@@ -4,10 +4,10 @@
 #   copies of each spell so a scripted game reaches them quickly regardless of the shuffle.
 NAME:Zone 1 Play Test
 9 [FRA:281] Plains
-9 [FRA:283] Island
+8 [FRA:283] Island
 8 [FRA:287] Mountain
-4 [FRA:145] Proctor of Potential
-2 [AER:98] Shock
+3 [FRA:145] Proctor of Potential
+4 [AER:98] Shock
 2 [DOM:60] Opt
 2 [ISD:83] Think Twice
 2 [ISD:155] Past in Flames
