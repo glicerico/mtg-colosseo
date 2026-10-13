@@ -1,0 +1,4 @@
+# description: test fixture: a counterspell (Icy Reception counters a creature spell unless its controller pays {3})
+NAME:Counter Test
+20 [FRA:283] Island
+20 [FRA:30] Icy Reception

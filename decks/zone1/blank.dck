@@ -1,0 +1,4 @@
+# description: test fixture for zone-1-play: a harmless opponent deck (lands only) so a scripted proof of the
+#   human seat's own graveyard/exile play isn't disturbed by the opponent's actions.
+NAME:Zone 1 Blank
+40 [FRA:281] Plains

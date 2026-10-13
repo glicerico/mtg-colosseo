@@ -54,6 +54,14 @@ Seat `type`: `agent` or `human` (controlled over the WebSocket - they differ onl
 the server allows deck paths: by default on a loopback server), or `sealed:SET` (six boosters of SET, auto-built into
 a 40-card two-color deck).
 
+Options for `xmage` seats, to replay a game against the AI from its moves (the AI's own play is not reproducible
+from the seed: it searches against a clock and iterates over objects in the order of their random ids):
+
+| key | default | meaning |
+|---|---|---|
+| `ai_moves` | - | `"record"`: log every decision the game asks of the AI, the moves it makes and the outcome, with the whole game state at each decision in names that are the same in every run of the seed, as `ai_move` lines of the full record (seat views never contain them). The AI's thinking then draws from its own random generator, so the seed's games differ from those of a seat without this option |
+| `ai_replay` | - | the `ai_move` lines of a recorded game (their `state` may be left out: `state_sha` is compared): the seat answers each decision from them instead of thinking, after checking that the game asks the recorded decision in the recorded state. The first difference is recorded as an `ai_replay_divergence` line when it happens, and the seat plays live from there; an `ai_replay` line before the result says how far it got |
+
 Options for `agent`/`human` seats:
 
 | key | default (agent / human) | meaning |
@@ -62,6 +70,7 @@ Options for `agent`/`human` seats:
 | `stop_policy` | `"all"` / `"arena"` | `all`: ask at every priority with legal actions. `arena`: only in your main phases, during combat and when the opponent puts something on the stack |
 | `yield_after_cast` | `false` / `true` | pass automatically right after casting/activating (let it resolve) |
 | `auto_pay` | `true` / `true` | pay mana costs automatically; otherwise `pay_mana` decisions are raised |
+| `mulligan_keep_first` | `false` / `true` | London mulligan asked as MTG Arena and MTGO ask it: keep or mulligan looking at the new seven cards, and once kept, the cards to put on the bottom (as many as mulligans taken). `false`: XMage's order, CR 103.5 as written (each mulligan's bottom cards right after its new seven, then keep or mulligan on the smaller hand). Both give the same choices and opening hands. Not for `xmage` seats: XMage's AI decides its mulligans counting on its own order |
 | `timeout_s` | `0` | apply the decision's default after this many seconds (0 = wait forever); counted as a `"timeout"` fallback |
 | `time_bank_s` | `0` | chess clock: total thinking time for the game, measured from the moment each decision is sent; running out forfeits it, including an answer that arrives after the time ran out (0 = no clock) |
 | `agent_id` | name | identity in records and ratings, e.g. `"my-agent@1.2"` (the SDK sends `name@version`) |
@@ -156,6 +165,7 @@ agent plus a human watching its view); any of them can answer.
 | `info` | `message`: an engine notice for this seat (e.g. why a block was illegal) |
 | `error` | `message`, optional `decision_id` and `code`: `"invalid"` = your answer was rejected and the decision stays pending (answer again); `"stale"` = the answer was for a decision that is no longer pending (e.g. a resend after reconnecting; ignore it) |
 | `game_over` | `result` (below) |
+| `event` | browser views only (seats of type `human`, spectators): `event`, one engine event, and `state`, this view right after it (see Events for the browser) |
 
 `result`: `status` (`"finished"` when the rules engine ended the game; `"terminated"`, `"abandoned"`,
 `"timeout"`, `"limit"`, `"turn_limit"` (with `turn_limit_result: "void"`) or `"error"` otherwise),
@@ -201,7 +211,7 @@ decision.
 | kind | extra fields | answer |
 |---|---|---|
 | `priority` | options have `action` (`cast`, `play_land`, `activate`, `special`, `pass`, `pass_turn`), `source_id`, `source_name`, `zone`, `mana_cost` | `{"choice": id}` |
-| `mulligan` | `hand_size` | `{"choice": "keep" \| "mulligan"}` |
+| `mulligan` | `hand_size`; with `mulligan_keep_first`, `bottom_on_keep` (how many of these cards go to the bottom if kept: the `target` decisions that follow a keep) | `{"choice": "keep" \| "mulligan"}` |
 | `yes_no` | `source_id` | `{"choice": "yes" \| "no"}` (labels may say e.g. "Pay") |
 | `target` | `min`, `max`, `required`, `chosen`, `zone`, `source_id`, `source_name`; options describe objects (`kind`: player/permanent/card/spell, `name`, `controller`, P/T...); `cards` (full card objects when choosing from hidden zones: library searches, scry, opponent's hand) | `{"choice": id}` one target at a time (`selected` options toggle off; `"done"` finishes when allowed) or `{"choices": [id, …]}` to pick several and finish |
 | `choose_mode` | - | `{"choice": mode id}` |
@@ -246,3 +256,53 @@ engine's keyword abilities, current: `"flying"`, `"menace"`, `"kicker {3}{B}"`, 
 (creatures, current values), `loyalty`, `counters`, `owner`, `token`. Permanents add `controller`, `tapped`,
 `summoning_sick`, `damage`, `attacking`, `blocking`, `attached_to`, `attachments`, `face_down`, `transformed`.
 Face-down objects you don't control appear as `{"id", "name": "Face-down creature", "hidden": true, …}`.
+
+**Browser views only:** in the states sent to seats of type `human` and to spectators (the web UI), visible
+permanents also carry `explain`, which says why they look the way they do. Agents' observations (seats of type
+`agent`, the environment) never include it. It is present on creatures, and on other permanents with effects
+acting on them:
+
+```json
+"explain": {
+  "printed": [2, 3],          // creatures: printed power/toughness
+  "set": [0, 1],              // only when an effect set the base power/toughness
+  "counters": [2, 2],         // only when nonzero: what +1/+1, -1/-1, ... counters add
+  "effects_pt": [3, 0],       // only when nonzero: what continuous effects add (current - set/printed - counters)
+  "effects": [{"source": "Sure Strike", "source_id": "…", "text": "Target creature gets +3/+0",
+               "duration": "until end of turn", "layer": "pt", "power": 3, "toughness": 0}],
+  "modified": true            // power/toughness differ from printed, or effects act on it
+}
+```
+
+`effects` lists the engine's continuous effects that apply to the permanent (layers: `control`, `type`, `color`,
+`abilities`, `pt`), with their source and duration; `power`/`toughness` appear when the effect declares a fixed
+boost. Attribution follows what each effect references (its affected objects, targets, source, attachment or
+filter); the totals always add up, whatever the attribution finds. A source that is hidden from the viewer is
+named "a hidden card". Building `explain` only reads the game (it writes nothing, not even effect timestamps), so explained
+views never change how a game plays; `test_explanations_do_not_change_play` checks this.
+
+Tokens in the same views also carry `token_image`, which picture shows them: the entry of XMage's token database the
+engine chose for the token (its set code, its name as Scryfall names tokens, its variant when that set has several
+of the name), e.g. `{"set": "FRA", "name": "Heartwood"}`. A token that copies a card has none: its `set` and `number`
+are the card's. The web UI looks the picture up on Scryfall (that set's tokens first, then any set).
+
+### Events for the browser
+
+XMage reports changes only at priority rounds and resolutions, so the `state` messages never show, for instance,
+an opponent's spell on the stack when you can't respond to it. Browser views therefore also get one `event`
+message per engine event, with the view right after it, which the web UI plays back step by step. Agents'
+connections never get them, and nothing about them goes into game records. Events name objects by id only (the
+names come from the `state`, masked as it is), and carry `seq` (their order in the game) and `log_at` (how many
+log lines there were when it happened: XMage writes the matching line just before or after).
+
+| `kind` | fields |
+|---|---|
+| `cast` | `id` (the spell), `card_id`, `player`, `from` (zone), `targets` |
+| `ability`, `trigger` | `id` (on the stack), `source_id`, `player`, `targets` (mana abilities and abilities that don't use the stack have none) |
+| `attack` | `attacker`, `defender` (a player or planeswalker), `player` |
+| `block` | `blocker`, `attacker`, `player` |
+| `damage` | `target`, `source`, `amount`, `combat`, `to_player` |
+| `life` | `player`, `amount` (gained: positive, lost: negative), `source` |
+| `move` | `id`, `from`, `to` (zones: `HAND`, `LIBRARY`, `BATTLEFIELD`, `GRAVEYARD`, `EXILED`, `STACK`, `OUTSIDE`, ...), `owner`, `token`; a card this view saw neither before nor after the move (an opponent's draw) comes without `id` and with `hidden: true`. A spell leaving the stack also has `reason`: `resolved`, `countered` (then `by`, the counter's source) or `fizzled` (all its targets were illegal as it began to resolve); none when an effect moved it otherwise. A card going from library to hand has `reason: "draw"` when it was drawn, none when anything else put it there (a search, landcycling); a land played has `reason: "played"`, none when an effect put it onto the battlefield |
+| `countered` | an ability or a copy of a spell countered (a countered spell's `move` says so): `id`, `source_id`, `by` (the counter's source), `player`; `copy: true` for a copy of a spell |
+| `reveal` | cards a player revealed: `player`, `ids` (public now: the `state`'s `revealed` shows the cards until the next update) |

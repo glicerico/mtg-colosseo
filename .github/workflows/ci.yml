@@ -26,9 +26,25 @@ jobs:
       - name: Install the SDK
         run: pip install -e "python/[dev]"
       - name: Unit tests
-        run: python -m pytest python/tests -m "not integration" -q
+        run: python -m pytest python/tests -m "not integration and not ui" -q
       - name: Check web modules parse
         run: for f in web/js/*.js; do node --check "$f"; done
+
+  web-ui:
+    name: Web UI tests (Playwright)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the SDK and Playwright
+        run: |
+          pip install -e "python/[dev,ui]"
+          python -m playwright install --with-deps chromium
+      - name: Board tests (zones, token stacks, attachments, stat markers, card size)
+        run: python -m pytest python/tests -m ui -v
 
   engine:
     name: Engine build, engine tests and integration tests

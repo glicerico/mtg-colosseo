@@ -4,9 +4,13 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import mage.MageObject;
 import mage.abilities.Ability;
+import mage.abilities.ActivatedAbility;
 import mage.abilities.Mode;
+import mage.abilities.hint.Hint;
 import mage.cards.Card;
 import mage.cards.Cards;
+import mage.cards.repository.TokenInfo;
+import mage.cards.repository.TokenRepository;
 import mage.constants.CardType;
 import mage.constants.ManaType;
 import mage.constants.SubType;
@@ -23,11 +27,15 @@ import mage.game.permanent.PermanentToken;
 import mage.game.stack.Spell;
 import mage.game.stack.StackAbility;
 import mage.game.stack.StackObject;
+import mage.abilities.hint.HintUtils;
+import mage.players.Library;
 import mage.players.ManaPool;
+import mage.players.PlayableObjectsList;
 import mage.players.Player;
 import mage.target.Target;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +61,15 @@ public final class StateView {
      * @param revealAll show every hand (spectator omniscient mode)
      */
     public static JsonObject build(Game game, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf) {
+        return build(game, viewerId, revealAll, seatOf, false);
+    }
+
+    /**
+     * @param explain add each permanent's {@code explain} (see {@link Explain}): for browser views only, never for
+     *                agents' observations
+     */
+    public static JsonObject build(Game game, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf, boolean explain) {
+        Explain explainer = explain ? new Explain(game, viewerId, revealAll) : null;
         JsonObject o = new JsonObject();
         o.addProperty("turn", game.getTurnNum());
         o.addProperty("phase", game.getTurnPhaseType() == null ? null : game.getTurnPhaseType().name());
@@ -63,7 +80,7 @@ public final class StateView {
 
         JsonArray players = new JsonArray();
         for (Player player : game.getState().getPlayers().values()) {
-            players.add(player(game, player, viewerId, revealAll, seatOf));
+            players.add(player(game, player, viewerId, revealAll, seatOf, explainer));
         }
         o.add("players", players);
 
@@ -118,7 +135,8 @@ public final class StateView {
         return o;
     }
 
-    private static JsonObject player(Game game, Player player, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf) {
+    private static JsonObject player(Game game, Player player, UUID viewerId, boolean revealAll, Map<UUID, Integer> seatOf,
+                                     Explain explainer) {
         JsonObject p = new JsonObject();
         p.addProperty("id", Json.str(player.getId()));
         p.addProperty("name", player.getName());
@@ -156,15 +174,201 @@ public final class StateView {
             p.add("hand", cards(game, player.getHand().getCards(game)));
         }
         p.add("graveyard", cards(game, player.getGraveyard().getCards(game)));
+        if (explainer != null && seesHand) {
+            p.add("off_hand", offHand(game, player));
+        }
 
         JsonArray battlefield = new JsonArray();
         for (Permanent perm : game.getBattlefield().getAllPermanents()) {
             if (perm.isControlledBy(player.getId()) && perm.isPhasedIn()) {
-                battlefield.add(permanent(game, perm, viewerId, revealAll));
+                JsonObject c = permanent(game, perm, viewerId, revealAll);
+                if (explainer != null && !c.has("hidden")) {
+                    JsonObject x = explainer.of(perm);
+                    if (x != null) {
+                        c.add("explain", x);
+                    }
+                    if (perm instanceof PermanentToken) {
+                        JsonObject image = tokenImage((PermanentToken) perm);
+                        if (image != null) {
+                            c.add("token_image", image);
+                        }
+                    }
+                }
+                battlefield.add(c);
             }
         }
         p.add("battlefield", battlefield);
         return p;
+    }
+
+    /**
+     * Cards usable from outside {@code player}'s hand, for browser views only (never an agent's): the player's
+     * own graveyard cards with an ability usable from there (flashback, escape, a graveyard-return ability, ...);
+     * any exile-zone card, of any owner, that the engine already lists as a legal play for this player (an
+     * impulse-draw or foretell-style "you may play this" grant is never owner-restricted in XMage, see
+     * {@code PlayerImpl.getPlayable}'s {@code Zone.EXILED} branch); and the top card of any in-range player's
+     * library when it is already a legal play for this player (the same {@code Zone.LIBRARY} branch) — a
+     * same-rank case to the exile one, never revealed unless the engine already allows playing it. {@code legal}
+     * is true when the engine's own {@link Player#getPlayableObjects} already lists the card (the same
+     * per-object legality {@code BridgePlayer} uses for the priority prompt, grouped by source id); for a
+     * not-yet-legal graveyard card, a {@code hint} when the gating ability already carries an XMage {@link Hint}
+     * (e.g. Proctor of Potential's "scried or surveilled this turn"), the author's own text with the Swing
+     * client's icon markup stripped, never guessed from card text. A card with neither is left out, so a
+     * graveyard of plain creatures adds nothing. Library/exile entries are only ever added when already legal,
+     * so nothing hidden is newly revealed.
+     */
+    private static JsonArray offHand(Game game, Player player) {
+        // the same per-object legality XMage's own Swing client reads for its graveyard/exile highlighting
+        // (PlayerPanelExt.isCardsPlayable, read from magefree/mage for design-zone-play.md)
+        PlayableObjectsList playable = player.getPlayableObjects(game, Zone.ALL);
+
+        Map<UUID, Zone> candidateZones = new LinkedHashMap<>();
+        Map<UUID, Card> candidateCards = new LinkedHashMap<>();
+        for (Card card : player.getGraveyard().getCards(game)) {
+            candidateZones.put(card.getId(), Zone.GRAVEYARD);
+            candidateCards.put(card.getId(), card);
+        }
+        for (ExileZone zone : game.getExile().getExileZones()) {
+            for (Card card : zone.getCards(game)) {
+                candidateZones.put(card.getId(), Zone.EXILED);
+                candidateCards.put(card.getId(), card);
+            }
+        }
+        for (UUID inRangeId : game.getState().getPlayersInRange(player.getId(), game)) {
+            Player inRange = game.getPlayer(inRangeId);
+            if (inRange == null) {
+                continue;
+            }
+            Library library = inRange.getLibrary();
+            if (library.hasCards()) {
+                Card top = library.getFromTop(game);
+                if (top != null && playable.containsObject(top.getId())) {
+                    candidateZones.put(top.getId(), Zone.LIBRARY);
+                    candidateCards.put(top.getId(), top);
+                }
+            }
+        }
+
+        JsonArray result = new JsonArray();
+        for (Map.Entry<UUID, Zone> e : candidateZones.entrySet()) {
+            UUID cardId = e.getKey();
+            Zone zone = e.getValue();
+            boolean legal = playable.containsObject(cardId);
+            String hint = legal ? null : hintFor(game, cardId, zone);
+            if (!legal && hint == null) {
+                continue;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("card_id", Json.str(cardId));
+            o.addProperty("zone", zone.name());
+            o.addProperty("legal", legal);
+            if (hint != null) {
+                o.addProperty("hint", hint);
+            }
+            // the full card view, not just an id: a library-top or another player's exiled card is never in any
+            // zone array this viewer's own state already carries (graveyard/exile there are owner-filtered, and
+            // libraries are never serialized at all), so the client has nothing else to look the card up by.
+            o.add("card", card(game, candidateCards.get(cardId)));
+            result.add(o);
+        }
+        return result;
+    }
+
+    /**
+     * The text of the first XMage {@link Hint} attached to an ability of {@code cardId} usable from {@code zone},
+     * when one exists: the author's own explanation of the gating condition, read independently of whether the
+     * ability is currently legal.
+     */
+    private static String hintFor(Game game, UUID cardId, Zone zone) {
+        Card card = game.getCard(cardId);
+        if (card == null) {
+            return null;
+        }
+        for (Ability ability : card.getAbilities(game)) {
+            if (!(ability instanceof ActivatedAbility) || ability.getZone() != zone) {
+                continue;
+            }
+            for (Hint hint : ability.getHints()) {
+                String text = cleanHintText(hint.getText(game, ability));
+                if (text != null && !text.isEmpty()) {
+                    return text;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * {@link Hint#getText} bakes the Swing client's own icon/colour markup directly into the string with no
+     * delimiter (e.g. {@code "ICON_BADYou've scried or surveilled this turn"}, see {@code HintUtils.prepareText}):
+     * a literal {@code HintUtils.HINT_ICON_GOOD}/{@code HINT_ICON_BAD} prefix, maybe a {@code <font color=...>}
+     * wrapper, maybe {@code HintUtils.HINT_START_MARK}. Strips those for the browser, which has no such markup,
+     * and turns the "false" branch (the gating condition not yet met) into a plain "needs: ..." sentence instead
+     * of leaving the reader to infer it from which icon used to be there.
+     */
+    private static String cleanHintText(String text) {
+        if (text == null) {
+            return null;
+        }
+        boolean unmet = text.startsWith(HintUtils.HINT_ICON_BAD);
+        for (String icon : new String[]{
+                HintUtils.HINT_ICON_GOOD, HintUtils.HINT_ICON_BAD,
+                HintUtils.HINT_ICON_RESTRICT, HintUtils.HINT_ICON_REQUIRE,
+        }) {
+            if (text.startsWith(icon)) {
+                text = text.substring(icon.length());
+                break;
+            }
+        }
+        text = text.replace(HintUtils.HINT_START_MARK, "");
+        text = text.replaceAll("</?font[^>]*>", "");
+        text = text.trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        if (unmet) {
+            char first = Character.toLowerCase(text.charAt(0));
+            text = "needs: " + first + text.substring(1);
+        }
+        return text;
+    }
+
+    /**
+     * Which picture shows a token, for browser views (like {@code explain}): the entry of XMage's token database that
+     * the engine chose when it created the token, i.e. its set code ("FRA"), its name as Scryfall names tokens
+     * ("Treasure", not "Treasure Token") and its variant within that set (when the set has several tokens of that
+     * name). The browser finds the image on Scryfall from these. Null for a token that copies a card: its set and
+     * number show it. Only reads XMage's static token database.
+     */
+    static JsonObject tokenImage(PermanentToken token) {
+        if (token.getCardNumber() != null && !token.getCardNumber().isEmpty()) {
+            return null;
+        }
+        String set = token.getExpansionSetCode();
+        int variant = token.getImageNumber() == null ? 0 : token.getImageNumber();
+        String name = null;
+        try {
+            for (TokenInfo info : TokenRepository.instance.getByClassName(token.getToken().getClass().getName())) {
+                if (info.getSetCode().equals(set) && (variant == 0 || info.getImageNumber() == variant)) {
+                    name = info.getName();
+                    break;
+                }
+            }
+        } catch (RuntimeException e) {
+            // no database entry: the name below
+        }
+        if (name == null) {
+            name = token.getName().replaceFirst(" Token$", "");
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("name", name);
+        if (set != null && !set.isEmpty() && !TokenRepository.XMAGE_TOKENS_SET_CODE.equals(set)) {
+            o.addProperty("set", set);
+            if (variant > 0) {
+                o.addProperty("variant", variant);
+            }
+        }
+        return o;
     }
 
     public static JsonArray cards(Game game, Iterable<? extends Card> cards) {
@@ -420,9 +624,15 @@ public final class StateView {
     /**
      * A stable ordering key for an object that does not depend on its (random) id: options are listed in this
      * order, so the same position means the same choice in every replay of a seed. Objects with equal keys are
-     * interchangeable for the game (two untapped Plains).
+     * interchangeable for the game (two untapped Plains); among them, and among players of the same name, the
+     * object's name in {@link StableIds} (its deck position, its creation order) decides, so their order is the same
+     * in every run of the seed too, not the order of their random ids.
      */
     static String sortKey(Game game, UUID id) {
+        return objectKey(game, id) + "||" + StableIds.tiebreak(game, id);
+    }
+
+    private static String objectKey(Game game, UUID id) {
         StringBuilder k = new StringBuilder();
         if (game.getPlayer(id) != null) {
             return "0|" + game.getPlayer(id).getName();

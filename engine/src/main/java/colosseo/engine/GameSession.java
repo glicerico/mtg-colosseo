@@ -8,13 +8,11 @@ import mage.constants.MultiplayerAttackOption;
 import mage.constants.RangeOfInfluence;
 import mage.game.Game;
 import mage.game.GameOptions;
-import mage.game.TwoPlayerDuel;
 import mage.game.TwoPlayerMatch;
 import mage.game.match.MatchOptions;
 import mage.game.events.Listener;
 import mage.game.events.PlayerQueryEvent;
 import mage.game.events.TableEvent;
-import mage.game.mulligan.MulliganType;
 import mage.player.ai.ComputerPlayerControllableProxy;
 import mage.players.Player;
 import mage.players.net.UserData;
@@ -90,6 +88,17 @@ public final class GameSession {
     private volatile long endedAt;
     private boolean drawDeclared;
     private BufferedWriter recorder;
+    /** object names that are the same in every run of the seed (recorded and replayed XMage AI moves) */
+    private final StableIds stableIds = new StableIds();
+
+    /** browser views' account of each game event (game thread) */
+    private final EventFeed feed = new EventFeed();
+    /**
+     * Event messages not sent yet: they wait for the next log line, update or decision, so that what a roll-back
+     * undoes (a cancelled cast, a previewed block) is dropped, never sent. Bookmark -> how many were waiting then.
+     */
+    private final List<Runnable> unsentEvents = new ArrayList<>();
+    private final Map<Integer, Integer> eventMarks = new HashMap<>();
 
     // cached views for newly attached clients (written by the game thread)
     private final Map<Integer, JsonObject> lastSeatState = new ConcurrentHashMap<>();
@@ -133,8 +142,32 @@ public final class GameSession {
         // every game runs with a known seed (recorded in the config and the result) so it can be replayed
         seed = config.seed != null ? config.seed : new java.security.SecureRandom().nextLong() & Long.MAX_VALUE;
         RandomUtil.setSeed(seed);
-        game = new TwoPlayerDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE,
-                MulliganType.GAME_DEFAULT.getMulligan(0), 40, config.startingLife, 7);
+        // the London mulligan; seats with mulligan_keep_first (human seats by default) decide keep-or-mulligan before
+        // putting cards on the bottom
+        KeepFirstLondonMulligan mulligan = new KeepFirstLondonMulligan(0);
+        // the live game reports its events for the browsers' event feed; the copies XMage's AI simulates on don't
+        game = new ObservedDuel(MultiplayerAttackOption.LEFT, RangeOfInfluence.ONE, mulligan, 40, config.startingLife, 7,
+                new ObservedDuel.Observer() {
+                    @Override
+                    public void event(mage.game.Game g, mage.game.events.GameEvent e) {
+                        onGameEvent(g, e);
+                    }
+
+                    @Override
+                    public void revealed(mage.game.Game g, UUID playerId, List<UUID> cards) {
+                        onReveal(g, playerId, cards);
+                    }
+
+                    @Override
+                    public void bookmarked(int bookmark) {
+                        markEvents(bookmark);
+                    }
+
+                    @Override
+                    public void restored(int bookmark) {
+                        dropEvents(bookmark);
+                    }
+                });
         GameOptions options = new GameOptions();
         options.rollbackTurnsAllowed = false;
         game.setGameOptions(options);
@@ -145,12 +178,17 @@ public final class GameSession {
             GameConfig.SeatConfig sc = seat.config();
             Deck deck = manager.decks().load(sc.deck);
             seat.deckFingerprint = DeckLibrary.fingerprint(deck);
-            Player player = createPlayer(sc);
+            Player player = createPlayer(sc, seat.index);
             seat.player = player;
             seat.playerId = player.getId();
             if (player instanceof BridgePlayer) {
                 ((BridgePlayer) player).attachSeat(seat);
             }
+            if (sc.mulliganKeepFirst) {
+                mulligan.keepFirst(player.getId());
+            }
+            stableIds.addPlayer(player.getId(), seat.index);
+            stableIds.addDeck(seat.index, deck.getCards());
             game.loadCards(deck.getCards(), player.getId());
             game.addPlayer(player, deck);
             match.addPlayer(player, deck);
@@ -158,6 +196,7 @@ public final class GameSession {
             seatIndex.put(player.getId(), seat.index);
         }
 
+        StableIds.register(game, stableIds);
         game.addTableEventListener((Listener<TableEvent>) this::onTableEvent);
         game.addPlayerQueryEventListener((Listener<PlayerQueryEvent>) this::onQuery);
 
@@ -174,11 +213,18 @@ public final class GameSession {
         thread.start();
     }
 
-    private Player createPlayer(GameConfig.SeatConfig sc) {
+    private Player createPlayer(GameConfig.SeatConfig sc, int seatIndex) {
         Player player;
         switch (sc.type) {
             case "xmage":
-                player = new ComputerPlayerControllableProxy(sc.name, RangeOfInfluence.ONE, sc.skill);
+                if (sc.aiMoves != null || sc.aiReplay != null) {
+                    ReplayableAiPlayer.Context ctx = new ReplayableAiPlayer.Context(stableIds, seatIndex, seed,
+                            sc.aiMoves != null ? line -> record("ai_move", line) : null, sc.aiReplay,
+                            note -> record("ai_replay_divergence", note));
+                    player = new ReplayableAiPlayer(sc.name, RangeOfInfluence.ONE, sc.skill, ctx);
+                } else {
+                    player = new ComputerPlayerControllableProxy(sc.name, RangeOfInfluence.ONE, sc.skill);
+                }
                 player.setUserData(UserData.getDefaultUserDataView());
                 break;
             default:
@@ -205,6 +251,7 @@ public final class GameSession {
     }
 
     private void finish() {
+        sendEvents();
         endedAt = System.currentTimeMillis();
         for (Seat seat : seats) {
             seat.pending.set(null);
@@ -278,6 +325,12 @@ public final class GameSession {
                 addLog("WARNING: this rated result could not be saved and will not survive a server restart");
             }
         }
+        for (Seat seat : seats) {
+            // owner-only line (seat views drop it): how far a replayed XMage seat followed its recorded moves
+            if (seat.player instanceof ReplayableAiPlayer && ((ReplayableAiPlayer) seat.player).ctx.replay != null) {
+                record("ai_replay", ((ReplayableAiPlayer) seat.player).ctx.summary());
+            }
+        }
         record("result", r);
         closeRecorder();
 
@@ -308,12 +361,24 @@ public final class GameSession {
         manager.onFinished(this);
     }
 
+    /**
+     * Whether a view carries the UI-only {@code explain} data: spectators (null) and seats of type {@code human}
+     * (the browser). Agents' observations never do.
+     */
+    private boolean explains(UUID viewer) {
+        if (viewer == null) {
+            return true;
+        }
+        Seat seat = seatByPlayer.get(viewer);
+        return seat != null && "human".equals(seat.config().type);
+    }
+
     private JsonObject safeState(UUID viewer, boolean revealAll) {
         if (game == null) {
             return null;
         }
         try {
-            return StateView.build(game, viewer, revealAll, seatIndex);
+            return StateView.build(game, viewer, revealAll, seatIndex, explains(viewer));
         } catch (RuntimeException e) {
             LOG.debug("final state failed", e);
             return null;
@@ -327,6 +392,7 @@ public final class GameSession {
     private void releaseGame() {
         if (game != null) {
             finalTurn = game.getTurnNum();
+            StableIds.unregister(game);
         }
         game = null;
         for (Seat seat : seats) {
@@ -526,6 +592,7 @@ public final class GameSession {
     }
 
     private void onUpdate() {
+        sendEvents();
         if (config.maxTurns > 0 && game.getTurnNum() > config.maxTurns && !drawDeclared) {
             drawDeclared = true;
             if ("void".equals(config.turnLimitResult)) {
@@ -540,8 +607,11 @@ public final class GameSession {
         for (Seat seat : seats) {
             if (seat.hasConnections()) {
                 watched = true;
-                JsonObject state = StateView.build(game, seat.playerId, false, seatIndex);
+                JsonObject state = StateView.build(game, seat.playerId, false, seatIndex, explains(seat.playerId));
                 lastSeatState.put(seat.index, state);
+                if (explains(seat.playerId)) {
+                    feed.seen("seat" + seat.index, state);
+                }
                 JsonObject msg = new JsonObject();
                 msg.addProperty("type", "state");
                 msg.add("state", state);
@@ -572,16 +642,132 @@ public final class GameSession {
             }
         }
         if (needNormal) {
-            lastSpectatorState = StateView.build(game, null, false, seatIndex);
+            lastSpectatorState = StateView.build(game, null, false, seatIndex, true);
+            feed.seen("spectators", lastSpectatorState);
         }
         if (needRevealed) {
-            lastSpectatorStateRevealed = StateView.build(game, null, true, seatIndex);
+            lastSpectatorStateRevealed = StateView.build(game, null, true, seatIndex, true);
+            feed.seen("spectators-revealed", lastSpectatorStateRevealed);
         }
         for (Connection c : spectators) {
             JsonObject msg = new JsonObject();
             msg.addProperty("type", "state");
             msg.add("state", c.revealAll ? lastSpectatorStateRevealed : lastSpectatorState);
             c.send(msg);
+        }
+    }
+
+    /**
+     * A game event of the live game ({@link ObservedDuel}), after XMage has handled it: browser views (human seats,
+     * spectators) get it with their state right after it ({@link EventFeed}); agents' connections never do. Nothing
+     * happens without a browser view, before the first turn (the mulligans) or off the game thread.
+     */
+    private void onGameEvent(mage.game.Game g, mage.game.events.GameEvent e) {
+        if (!EventFeed.TYPES.contains(e.getType())) {
+            return;
+        }
+        List<Seat> views = feedViews(g);
+        if (views == null) {
+            return;
+        }
+        try {
+            sendEvent(feed.describe(game, e, log.size()), views);
+        } catch (RuntimeException ex) {
+            LOG.debug("event feed: " + e.getType(), ex); // the feed is only for the browsers' eyes: the game goes on
+        }
+    }
+
+    /** A player revealed cards ({@link ObservedDuel}): browser views are told, as of a game event. */
+    private void onReveal(mage.game.Game g, UUID playerId, List<UUID> cards) {
+        List<Seat> views = feedViews(g);
+        if (views == null) {
+            return;
+        }
+        try {
+            sendEvent(feed.reveal(playerId, cards, log.size()), views);
+        } catch (RuntimeException ex) {
+            LOG.debug("event feed: reveal", ex);
+        }
+    }
+
+    /**
+     * The seats with a browser view of the live game, when the event feed has anyone to tell (those seats or
+     * spectators); null when it hasn't, before the first turn (the mulligans) or off the game thread.
+     */
+    private List<Seat> feedViews(mage.game.Game g) {
+        if (g != game || Thread.currentThread() != thread || game.getTurnStepType() == null) {
+            return null;
+        }
+        List<Seat> views = new ArrayList<>();
+        for (Seat seat : seats) {
+            if (seat.hasConnections() && explains(seat.playerId)) {
+                views.add(seat);
+            }
+        }
+        return views.isEmpty() && spectators.isEmpty() ? null : views;
+    }
+
+    /** Queues an event (if any) for each browser view, with the view's state right after it. */
+    private void sendEvent(JsonObject ev, List<Seat> views) {
+        if (ev == null) {
+            return;
+        }
+        for (Seat seat : views) {
+            JsonObject msg = feed.message(ev, StateView.build(game, seat.playerId, false, seatIndex, true), "seat" + seat.index);
+            queueEvent(() -> seat.broadcast(msg));
+        }
+        if (!spectators.isEmpty()) {
+            JsonObject normal = null;
+            JsonObject revealed = null;
+            for (Connection c : spectators) {
+                if (c.revealAll && revealed == null) {
+                    revealed = feed.message(ev, StateView.build(game, null, true, seatIndex, true), "spectators-revealed");
+                } else if (!c.revealAll && normal == null) {
+                    normal = feed.message(ev, StateView.build(game, null, false, seatIndex, true), "spectators");
+                }
+            }
+            JsonObject r = revealed != null ? revealed : normal;
+            JsonObject n = normal != null ? normal : revealed;
+            queueEvent(() -> broadcastSpectators(r, n));
+        }
+    }
+
+    private void queueEvent(Runnable send) {
+        synchronized (unsentEvents) {
+            unsentEvents.add(send);
+        }
+    }
+
+    /** Sends the event messages waiting: called before each log line, update and decision, and at the end. */
+    private void sendEvents() {
+        List<Runnable> out;
+        synchronized (unsentEvents) {
+            if (unsentEvents.isEmpty()) {
+                return;
+            }
+            out = new ArrayList<>(unsentEvents);
+            unsentEvents.clear();
+            eventMarks.clear();
+        }
+        for (Runnable send : out) {
+            send.run();
+        }
+    }
+
+    private void markEvents(int bookmark) {
+        synchronized (unsentEvents) {
+            eventMarks.put(bookmark, unsentEvents.size());
+        }
+    }
+
+    /** The game went back to a bookmark: the events since then didn't happen. */
+    private void dropEvents(int bookmark) {
+        synchronized (unsentEvents) {
+            int keep = eventMarks.getOrDefault(bookmark, 0);
+            while (unsentEvents.size() > keep) {
+                unsentEvents.remove(unsentEvents.size() - 1);
+            }
+            eventMarks.keySet().removeIf(b -> b >= bookmark);
         }
     }
 
@@ -609,6 +795,7 @@ public final class GameSession {
         if (text == null || text.isEmpty()) {
             return;
         }
+        sendEvents();
         JsonObject entry = new JsonObject();
         entry.addProperty("i", log.size());
         entry.addProperty("turn", game == null ? 0 : game.getTurnNum());
@@ -635,6 +822,7 @@ public final class GameSession {
      * Publishes a decision to the seat's clients (game thread; the caller then waits for the answer).
      */
     void publish(Seat seat, Decision d) {
+        sendEvents();
         JsonObject queued = seat.nextQueuedChoice(d);
         if (queued != null) {
             d.responder.validate(queued);
@@ -664,7 +852,7 @@ public final class GameSession {
             stop("limit", "decision limit (" + config.maxDecisions + ") reached");
             return;
         }
-        d.state = StateView.build(game, seat.playerId, false, seatIndex);
+        d.state = StateView.build(game, seat.playerId, false, seatIndex, explains(seat.playerId));
         d.newLog = seat.takeNewLog(log);
         lastSeatState.put(seat.index, d.state);
         expose(seat, d);
@@ -943,7 +1131,7 @@ public final class GameSession {
             return null;
         }
         try {
-            return StateView.build(game, viewer, revealAll, seatIndex);
+            return StateView.build(game, viewer, revealAll, seatIndex, explains(viewer));
         } catch (RuntimeException e) {
             return null;
         }

@@ -54,6 +54,12 @@ public final class GameConfig {
         public boolean yieldAfterCast;
         public boolean autoPay = true;
         /**
+         * human and agent seats: the London mulligan asked keep-first, as MTG Arena and MTGO ask it (keep or mulligan
+         * looking at the new seven cards; the cards to put on the bottom once kept) instead of XMage's order (each
+         * mulligan's bottom cards right after its new seven, then keep or mulligan). Default: human seats only.
+         */
+        public boolean mulliganKeepFirst;
+        /**
          * seconds before the default action is taken (0 = wait forever)
          */
         public double timeoutS = 0;
@@ -69,6 +75,15 @@ public final class GameConfig {
          * content hash of the agent's code, if the client provides one
          */
         public String agentHash;
+        /**
+         * xmage seats only: "record" logs every move of XMage's AI (record lines "ai_move") so that the game can
+         * be replayed from its moves; null (default) plays the plain AI
+         */
+        public String aiMoves;
+        /**
+         * xmage seats only: the "ai_move" lines of a recorded game, applied instead of the AI's own play
+         */
+        public JsonArray aiReplay;
 
         public boolean isBridge() {
             return "human".equals(type) || "agent".equals(type);
@@ -91,12 +106,33 @@ public final class GameConfig {
             }
             s.yieldAfterCast = Json.getBool(o, "yield_after_cast", human);
             s.autoPay = Json.getBool(o, "auto_pay", true);
+            s.mulliganKeepFirst = Json.getBool(o, "mulligan_keep_first", human);
+            if (s.mulliganKeepFirst && "xmage".equals(s.type)) {
+                // XMage's AI decides its mulligans counting on XMage's order (it keeps any hand under six cards)
+                throw new IllegalArgumentException("mulligan_keep_first is for human and agent seats");
+            }
             s.timeoutS = o.has("timeout_s") ? o.get("timeout_s").getAsDouble() : 0;
             s.timeBankS = Math.max(0, o.has("time_bank_s") && !o.get("time_bank_s").isJsonNull() ? o.get("time_bank_s").getAsDouble() : 0);
             s.agentId = Json.getString(o, "agent_id", null);
             s.agentHash = Json.getString(o, "agent_hash", null);
             if (s.agentId != null && (s.agentId.isBlank() || s.agentId.length() > 200)) {
                 throw new IllegalArgumentException("agent_id must be 1-200 characters");
+            }
+            s.aiMoves = Json.getString(o, "ai_moves", null);
+            if (s.aiMoves != null && !s.aiMoves.equals("record")) {
+                throw new IllegalArgumentException("ai_moves must be 'record'");
+            }
+            if (o.has("ai_replay") && !o.get("ai_replay").isJsonNull()) {
+                if (!o.get("ai_replay").isJsonArray()) {
+                    throw new IllegalArgumentException("ai_replay must be a list of recorded ai_move lines");
+                }
+                s.aiReplay = o.getAsJsonArray("ai_replay");
+            }
+            if ((s.aiMoves != null || s.aiReplay != null) && !"xmage".equals(s.type)) {
+                throw new IllegalArgumentException("ai_moves and ai_replay are for xmage seats");
+            }
+            if (s.aiMoves != null && s.aiReplay != null) {
+                throw new IllegalArgumentException("a seat either records or replays its AI moves");
             }
             return s;
         }
@@ -123,11 +159,20 @@ public final class GameConfig {
             }
             if (!isBridge()) {
                 o.addProperty("skill", skill);
+                if (aiMoves != null) {
+                    o.addProperty("ai_moves", aiMoves);
+                }
+                if (aiReplay != null) {
+                    o.addProperty("ai_replay_lines", aiReplay.size());
+                }
             } else {
                 o.addProperty("auto_pass", autoPassNoActions);
                 o.addProperty("stop_policy", stopPolicy);
                 o.addProperty("yield_after_cast", yieldAfterCast);
                 o.addProperty("auto_pay", autoPay);
+                if (mulliganKeepFirst != "human".equals(type)) {
+                    o.addProperty("mulligan_keep_first", mulliganKeepFirst); // only when not the seat type's default
+                }
                 o.addProperty("timeout_s", timeoutS);
                 o.addProperty("time_bank_s", timeBankS);
             }

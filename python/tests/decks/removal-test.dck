@@ -1,0 +1,4 @@
+# description: test fixture: a removal spell targeting a creature (the fizzle test takes its target away)
+NAME:Removal Test
+20 [FRA:285] Swamp
+20 [FRA:56] Last Gasp

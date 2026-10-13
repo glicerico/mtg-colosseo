@@ -1,0 +1,5 @@
+# description: test fixture: a targeted burn spell (Burst Lightning) and a creature whose activated ability targets (Fanatical Firebrand), for the ward test
+NAME:Burn Test
+16 [FDN:278] Mountain
+12 [FDN:195] Fanatical Firebrand
+12 [FDN:192] Burst Lightning

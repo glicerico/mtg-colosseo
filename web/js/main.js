@@ -11,7 +11,7 @@ function route() {
   if (current && current.destroy) current.destroy();
   current = null;
   closeAllModals();
-  hidePreview();
+  hidePreview(true);
   const app = document.getElementById('app');
   app.innerHTML = '';
   app.className = '';

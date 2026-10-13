@@ -41,7 +41,7 @@ final class QueryTranslator {
         BridgePlayer.QueryContext ctx = player.currentContext();
         switch (e.getQueryType()) {
             case ASK:
-                return ask(session, player, e, ctx);
+                return ask(session, player, game, e, ctx);
             case PICK_TARGET:
                 return target(session, player, game, e, ctx);
             case PICK_ABILITY:
@@ -91,7 +91,7 @@ final class QueryTranslator {
 
     // ---------------------------------------------------------------------------------------------
 
-    private static Decision ask(GameSession session, BridgePlayer player, PlayerQueryEvent e, BridgePlayer.QueryContext ctx) {
+    private static Decision ask(GameSession session, BridgePlayer player, Game game, PlayerQueryEvent e, BridgePlayer.QueryContext ctx) {
         boolean mulligan = ctx != null && Decision.MULLIGAN.equals(ctx.kindHint);
         Decision d = session.newDecision(mulligan ? Decision.MULLIGAN : Decision.YES_NO, player.getId());
         d.prompt = prompt(e);
@@ -99,6 +99,12 @@ final class QueryTranslator {
             d.addOption("keep", "Keep");
             d.addOption("mulligan", "Mulligan");
             d.extra.addProperty("hand_size", player.getHand().size());
+            if (game.getMulligan() instanceof KeepFirstLondonMulligan
+                    && ((KeepFirstLondonMulligan) game.getMulligan()).isKeepFirst(player.getId())) {
+                // keep-first seats (mulligan_keep_first): how many of these cards go to the bottom on keeping; other
+                // seats' decisions don't have it (they have already put them there)
+                d.extra.addProperty("bottom_on_keep", ((KeepFirstLondonMulligan) game.getMulligan()).bottomOnKeep(game, player.getId()));
+            }
         } else {
             d.addOption("yes", Json.plain(option(e, "UI.left.btn.text", "Yes")));
             d.addOption("no", Json.plain(option(e, "UI.right.btn.text", "No")));

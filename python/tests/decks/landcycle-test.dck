@@ -1,0 +1,4 @@
+# description: test fixture: basic landcycling (Apex Witchstalker: discard it and pay {2} to search your library for a basic land card, reveal it and put it into your hand), so that a card goes from library to hand without being drawn
+NAME:Landcycle Test
+20 [FRA:285] Swamp
+20 [FRA:48] Apex Witchstalker

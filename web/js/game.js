@@ -1,7 +1,8 @@
 // Game board: renders the observation and turns clicks into protocol actions.
 import { wsUrl, getGame, seatToken, ownerToken, forgetToken } from './api.js';
 import { h, modal, toast, closeAllModals, manaSymbols, escapeRules } from './ui.js';
-import { renderCard, cardBack, hidePreview, settings, setImages } from './cards.js';
+import { renderCard, cardBack, showPreview, hidePreview, pinnedCard, settings, setImages, setCardScale, CARD_SCALE, onTokenImage, imageUrl } from './cards.js';
+import { Fx } from './fx.js';
 
 const STEPS = [
   ['UNTAP', 'Untap'], ['UPKEEP', 'Upkeep'], ['DRAW', 'Draw'], ['PRECOMBAT_MAIN', 'Main 1'],
@@ -18,6 +19,156 @@ const KIND_TITLES = {
 
 const isLand = (c) => (c.types || []).includes('Land') && !(c.types || []).includes('Creature');
 const isCreature = (c) => (c.types || []).includes('Creature');
+/** The order of a new hand: lands first, then by mana value. */
+const sortHand = (cards) => [...cards].sort((a, b) => (isLand(b) - isLand(a)) || ((a.mana_value || 0) - (b.mana_value || 0)));
+// how long a card that just arrived in hand stays highlighted (ms)
+const NEW_IN_HAND_MS = 2500;
+
+// What happens is shown step by step (design-opponent-turn.md): how long each kind of step stays at "Normal" (ms),
+// the paces a player can choose, and how much faster the player's own actions go (they know what they did).
+// Steps that pile up go faster, so that the board is never more than about LAG_MS behind the game.
+const STEP_MS = { cast: 1300, trigger: 1100, ability: 1100, attack: 1000, block: 1000, hit: 800, countered: 900,
+  move: 700, leave: 800, draw: 350, reveal: 1100 };
+const PACES = { slow: 1.6, normal: 1, fast: 0.5, off: 0 };
+const PACE_NAMES = { slow: 'Slow', normal: 'Normal', fast: 'Fast', off: 'Off' };
+const PACE_KEY = 'colosseo.pace';
+const OWN_K = 0.35;
+const LAG_MS = 5000;
+const MIN_STEP_MS = 250;
+const ZONE_NAMES = { GRAVEYARD: 'graveyard', EXILED: 'exile', HAND: 'hand', LIBRARY: 'library', BATTLEFIELD: 'battlefield', STACK: 'stack' };
+const REVEAL_CARDS = 10; // revealed cards a step shows large and names (a whole hand); more are counted
+
+/**
+ * What a log line reports, from XMage's wording. Tested in this order: a trigger's or an activation's line quotes its
+ * rule text, which may say anything ("... dies, create ...").
+ */
+const LINE_KINDS = [
+  ['turn', /^TURN \d+ for /], ['trigger', / - Ability triggers: /], ['ability', / activates: /],
+  ['block', /^Attacker: .* blocked by /], ['other', /^Attacker: /], ['attack', / attacks .+ with \d+ creatures?$/],
+  ['countered', / is countered by /], ['fizzled', /has been fizzled/], ['other', / could not be countered /],
+  ['cast', / casts /], ['damage', / deals \d+ damage to | loses \d+ life/], ['life', / gains \d+ life/],
+  ['draw', / draws (a|an|\w+) (revealed )?cards?\b/], ['reveal', / reveals /],
+  ['move', / died\b| discards | sacrificed | is put into \w+ from | creates an? .* token| plays | moves .* to the exile zone| puts .* (from|into|onto) | (exiles|mills|returns) /],
+];
+const lineKind = (text) => (LINE_KINDS.find(([, re]) => re.test(text)) || ['other'])[0];
+// what a line about a card moving says of where it goes
+const TO_WORDS = { GRAVEYARD: /graveyard| died\b| discards | sacrificed | mills /, EXILED: /exile/, LIBRARY: /library/,
+  HAND: /into (their|its owner's) hand| returns /, BATTLEFIELD: /onto the Battlefield| plays | creates / };
+// how far from log_at an event's line may be: lines that name its object by id, by name only
+const ID_REACH = 8;
+const NAME_REACH = 4;
+
+/**
+ * The lines an event wants in the log (logLinesOf): for each, the kinds of line and a test of its text. A line names
+ * objects by their ids' first characters ("Cadet [ad4]"); the test looks for the event's own object where the line
+ * names its subject, not among the objects it mentions (its targets, "(source: ...)"). name(id) gives a player's or
+ * a card's name.
+ */
+function linesOf(ev, name) {
+  const names = (...ids) => (t) => ids.some((x) => x && t.includes(`[${x.slice(0, 3)}]`));
+  const before = (t, s) => (t.includes(s) ? t.slice(0, t.indexOf(s)) : t);
+  const after = (t, s) => (t.includes(s) ? t.slice(t.lastIndexOf(s)) : '');
+  const startsWith = (id) => (t) => { const n = id && name(id); return !!n && t.startsWith(`${n} `); };
+  // a card moving: "P1 discards Goblin Oriflamme [62f] (source: Seize the Spoils [6c0])", "X [73d] died by Y [64a]"
+  const subject = (t) => before(before(t, ' (source: '), ' died by ');
+  const byId = (kinds, test) => ({ kinds, test, reach: ID_REACH });
+  const byName = (kinds, test) => ({ kinds, test, reach: NAME_REACH });
+  switch (ev.kind) {
+    case 'cast': return [byId(['cast'], (t) => names(ev.card_id, ev.id)(before(t, ' targeting ')))];
+    case 'trigger': return [byId(['trigger'], (t) => names(ev.source_id)(before(after(t, 'Ability triggers: '), ' - ')))];
+    case 'ability': return [byId(['ability'], (t) => names(ev.source_id)(after(t, ' from ')))];
+    case 'attack': return [byName(['attack'], startsWith(ev.player))];
+    case 'block': return [byId(['block'], (t) => names(ev.blocker)(after(t, ' blocked by ')))];
+    case 'damage': // "Pia [b80] deals 3 damage to Corsair Captain [ac4]"; a player: "P0 loses 2 life at combat from Thopter Token [347]"
+      return [ev.to_player ? byId(['damage'], (t) => startsWith(ev.target)(t) && t.includes(` loses ${ev.amount} life`) && names(ev.source)(t))
+        : byId(['damage'], (t) => names(ev.target)(after(t, ' damage to ')))];
+    case 'life': { // "Opp gains 1 life (source: Authority of the Consuls [33c])", "Opp loses 1 life from Impact Tremors [235]"
+      const says = (t) => startsWith(ev.player)(t) && t.includes(ev.amount > 0 ? ` gains ${ev.amount} life` : ` loses ${-ev.amount} life`);
+      return [ev.source ? byId(['life', 'damage'], (t) => says(t) && names(ev.source)(t)) : byName(['life', 'damage'], says)];
+    }
+    case 'countered': return [byId(['countered'], (t) => names(ev.source_id, ev.id)(before(t, ' is countered by ')))];
+    case 'move': {
+      if (ev.from === 'LIBRARY' && ev.to === 'HAND') {
+        // drawn: "Opp draws a card", "Opp draws two cards"
+        if (ev.reason === 'draw') return [byName(['draw'], startsWith(ev.owner))];
+        // anything else (a search, landcycling): "P puts a card from library into their hand", which names no card
+        // (or "P puts Swamp [1a2] ...": then it must be this one), or "... into its owner's hand" when P isn't its owner
+        const named = (t) => /\[\w{3}\]/.test(before(t, ' from library'));
+        return [byName(['move'], (t) => (startsWith(ev.owner)(t) ? / from library into their hand/ : / from library into its owner's hand/).test(t)
+          && (!named(t) || !ev.id || names(ev.id)(subject(t))))];
+      }
+      if (!ev.id) return [byName(['move'], startsWith(ev.owner))];
+      const to = TO_WORDS[ev.to];
+      const own = byId(['move'], (t) => names(ev.id)(subject(t)) && (!to || to.test(t)));
+      if (ev.from === 'STACK' && ev.reason === 'countered') return [own, byId(['countered'], (t) => names(ev.id)(before(t, ' is countered by ')))];
+      if (ev.from === 'STACK' && ev.reason === 'fizzled') return [own, byName(['fizzled'], startsWith(ev.id))];
+      // played: "P puts Swamp [860] from hand onto the Battlefield", then "P plays Swamp [860]"
+      if (ev.reason === 'played') return [own, byId(['move'], (t) => / plays /.test(t) && names(ev.id)(t))];
+      return [own];
+    }
+    case 'reveal': // "P reveals Swamp, Island": cards are named, without ids
+      return [byName(['reveal'], (t) => startsWith(ev.player)(t)
+        && (ev.ids || []).every((id) => !name(id) || after(t, ' reveals ').includes(name(id))))];
+    default: return [];
+  }
+}
+
+/** Which step an event belongs to: events the engine reports one by one but that are one action go together. */
+function stepKey(ev) {
+  if (ev.kind === 'move' && ev.to === 'STACK') return 'to-stack'; // a card going to the stack: part of casting it
+  if (ev.kind === 'move' && ev.from === 'STACK' && ['countered', 'fizzled'].includes(ev.reason)) return 'countered';
+  if (ev.kind === 'damage' || ev.kind === 'life') return 'hit';
+  if (ev.kind === 'move' && ev.from === 'BATTLEFIELD' && ['GRAVEYARD', 'EXILED'].includes(ev.to)) return 'leave';
+  if (ev.kind === 'move' && ev.from === 'LIBRARY' && ev.to === 'HAND' && ev.reason === 'draw') return 'draw';
+  return ev.kind;
+}
+
+/** Whether a waiting frame joins the step being built: the attackers of one declaration, combat damage, deaths... */
+function joins(batch, next) {
+  if (!next.event || next.decision || next.result) return false;
+  const last = batch[batch.length - 1].event;
+  if (!last) return false;
+  const a = stepKey(last);
+  const b = stepKey(next.event);
+  if (a === 'to-stack') return b === 'cast' || b === 'ability' || b === 'trigger';
+  return a === b && ['attack', 'block', 'hit', 'leave', 'draw'].includes(a);
+}
+
+// Card width limits (px); the size of lands and other permanents, and of the cards in hand, relative to creatures:
+// full size, and the smallest they shrink to before the creatures do.
+const CARD_MIN = 48;
+const CARD_MAX = 480;
+const LAND_K = { max: 0.72, min: 0.4 };
+const HAND_K = { max: 0.95, min: 0.45 };
+const ROW_GAP = 6; // between the rows of a side (.side, .field gap)
+const BESIDE_GAP = 14; // between the creature row and the land/other row beside it
+const SIDE_PAD = 12; // a side's vertical padding
+const FIT_SLACK = 16; // room for attacking creatures, which are drawn moved toward the middle
+const HAND_PAD = 18; // above the hand, where a hovered card rises
+
+/**
+ * Whether the rows fit the board at card width w, land/other scale k and hand scale hk, with each side's
+ * land/other row beside its creatures (cfg.top, cfg.bottom) or behind them. Creature rows must fit the width
+ * (so the size control can't push creatures out of view); strict: land/other rows too, without shrinking.
+ */
+function fits(m, w, k, hk, cfg, strict) {
+  let height = m.Itop + Math.max(m.Ibot, HAND_PAD + 1.395 * hk * w) + 2 * ROW_GAP;
+  for (const s of ['top', 'bottom']) {
+    const z = m[s];
+    const ch = Math.max(1.395 * w + 8, z.ch.a * w + z.ch.b);
+    const cw = z.cw.a * w + z.cw.b;
+    const pw = z.has ? z.pw.a * k * w + z.pw.b : 0;
+    const ph = z.has ? Math.max(1.395 * k * w + 4, z.ph.a * k * w + z.ph.b) : 0;
+    if (cfg[s]) {
+      if (cw + BESIDE_GAP + pw > m.W) return false;
+      height += Math.max(ch, ph);
+    } else {
+      if (cw > m.W || (strict && pw > m.W)) return false;
+      height += ch + (z.has ? ROW_GAP + ph : 0);
+    }
+  }
+  return height <= m.avail;
+}
 
 export class GameView {
   constructor(root, gameId, seat) {
@@ -39,16 +190,36 @@ export class GameView {
     this.retryMs = 1000;
     this.destroyed = false;
     this.pollTimer = null;
+    this.groups = new Map(); // wrappers for token stacks and attachment groups, by key
+    this.handOrder = null; // ids of the cards in this player's hand, left to right (null: no hand seen yet)
+    this.newInHand = new Map(); // id -> time until which a card that just arrived in hand is highlighted
+    this.queue = []; // frames waiting to be shown: {state, event?, decision?, result?}, in the order they came
+    this.playing = false;
+    this.pace = PACES[localStorage.getItem(PACE_KEY)] !== undefined ? localStorage.getItem(PACE_KEY) : 'normal';
+    this.memberHost = new Map(); // id of a token shown in a stack -> id of the stack's card
+    this.logByI = new Map(); // log line index -> {entry, el}
+    this.names = new Map(); // id -> name of each object a state showed: for those that have left it since
     this.keyHandler = (e) => this.onKey(e);
     document.addEventListener('keydown', this.keyHandler);
+    this.resizeHandler = () => this.layout();
+    window.addEventListener('resize', this.resizeHandler);
+    this.offTokenImage = onTokenImage(() => { if (!this.destroyed) this.render(); }); // a token's image was found
     this.build();
+    this.layout();
     this.connect();
   }
 
   destroy() {
     this.destroyed = true;
     document.removeEventListener('keydown', this.keyHandler);
+    window.removeEventListener('resize', this.resizeHandler);
+    this.offTokenImage();
+    for (const v of ['--card-w', '--ui', '--land-k', '--hand-k']) document.documentElement.style.removeProperty(v);
     clearInterval(this.pollTimer);
+    clearTimeout(this.newInHandTimer);
+    clearTimeout(this.stepTimer);
+    clearTimeout(this.linkTimer);
+    if (this.fx) this.fx.clear();
     if (this.ws) this.ws.close();
     document.getElementById('conn-status').textContent = '';
   }
@@ -59,17 +230,23 @@ export class GameView {
 
   build() {
     this.root.className = 'game-page';
+    // per player: creatures nearest the middle; then lands and the other permanents (artifacts, enchantments,
+    // planeswalkers, ...) side by side; then the player and the hand
     this.el = {
       topInfo: h('div', { class: 'player-info top' }),
+      topOffHand: h('div', { class: 'off-hand-row top empty' }),
       topHand: h('div', { class: 'hand-row top' }),
-      topLands: h('div', { class: 'zone-row lands' }),
-      topPerms: h('div', { class: 'zone-row perms' }),
+      topLands: h('div', { class: 'zone lands', title: 'Lands' }),
+      topOthers: h('div', { class: 'zone others', title: 'Other permanents' }),
+      topCreatures: h('div', { class: 'zone creatures' }),
       phase: h('div', { class: 'phase-bar' }),
       stack: h('div', { class: 'stack-area' }),
       center: h('div', { class: 'center-msg' }),
-      botPerms: h('div', { class: 'zone-row perms' }),
-      botLands: h('div', { class: 'zone-row lands' }),
+      botCreatures: h('div', { class: 'zone creatures' }),
+      botLands: h('div', { class: 'zone lands', title: 'Lands' }),
+      botOthers: h('div', { class: 'zone others', title: 'Other permanents' }),
       botInfo: h('div', { class: 'player-info bottom' }),
+      botOffHand: h('div', { class: 'off-hand-row bottom empty' }),
       botHand: h('div', { class: 'hand-row bottom' }),
       prompt: h('div', { class: 'prompt-bar' }),
       header: h('div', { class: 'side-header' }),
@@ -77,13 +254,17 @@ export class GameView {
       banner: h('div', { class: 'banner hidden' }),
     };
     const e = this.el;
-    const board = h('div', { class: 'board' },
-      e.banner,
-      h('div', { class: 'side top' }, h('div', { class: 'info-hand' }, e.topInfo, e.topHand), e.topLands, e.topPerms),
-      h('div', { class: 'middle' }, e.phase, h('div', { class: 'middle-row' }, e.center, e.stack)),
-      h('div', { class: 'side bottom' }, e.botPerms, e.botLands, h('div', { class: 'info-hand' }, e.botInfo, e.botHand)),
-      e.prompt);
+    e.topPerm = h('div', { class: 'perm-row' }, e.topLands, e.topOthers);
+    e.botPerm = h('div', { class: 'perm-row' }, e.botLands, e.botOthers);
+    e.topInfoHand = h('div', { class: 'info-hand' }, e.topInfo, e.topOffHand, e.topHand);
+    e.botInfoHand = h('div', { class: 'info-hand' }, e.botInfo, e.botOffHand, e.botHand);
+    e.topSide = h('div', { class: 'side top' }, e.topInfoHand, h('div', { class: 'field' }, e.topPerm, e.topCreatures));
+    e.botSide = h('div', { class: 'side bottom' }, h('div', { class: 'field' }, e.botCreatures, e.botPerm), e.botInfoHand);
+    e.middle = h('div', { class: 'middle' }, e.phase, h('div', { class: 'middle-row' }, e.center, e.stack));
+    const board = h('div', { class: 'board' }, e.banner, e.topSide, e.middle, e.botSide, e.prompt);
     board.addEventListener('click', (ev) => this.onBoardClick(ev));
+    this.board = board;
+    this.fx = new Fx(board);
     this.root.append(board, h('aside', { class: 'sidebar' }, e.header, e.log));
     this.renderHeader();
   }
@@ -164,7 +345,13 @@ export class GameView {
           this.reveal = !!msg.reveal;
         }
         if (msg.state) this.state = msg.state;
+        this.learnNames(msg.state);
+        this.queue = [];
+        this.playing = false;
+        clearTimeout(this.stepTimer);
+        this.fx.clear();
         this.log = [];
+        this.logByI.clear();
         this.el.log.innerHTML = '';
         (msg.log || []).forEach((e) => this.addLog(e));
         this.renderHeader();
@@ -172,16 +359,14 @@ export class GameView {
         this.render();
         break;
       case 'state':
-        this.state = msg.state;
-        this.render();
+        this.enqueue({ state: msg.state });
+        break;
+      case 'event': // browser views only: one engine event and the board right after it
+        this.enqueue({ state: msg.state, event: msg.event });
         break;
       case 'decision':
         if (this.sent && this.sent.decision_id === msg.decision_id) return; // already answered
-        this.decision = msg;
-        this.state = msg.state || this.state;
-        this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
-        this.render();
-        this.autoOpen();
+        this.enqueue({ state: msg.state, decision: msg });
         break;
       case 'decision_pending':
         this.waiting = msg;
@@ -215,11 +400,7 @@ export class GameView {
         toast(msg.message, 'error', 6000);
         break;
       case 'game_over':
-        this.result = msg.result;
-        if (msg.state) this.state = msg.state;
-        this.decision = null;
-        this.render();
-        this.showResult();
+        this.enqueue({ state: msg.state, result: msg.result });
         break;
       default:
         break;
@@ -234,8 +415,29 @@ export class GameView {
       this.el.log.appendChild(h('div', { class: 'log-turn' }, `Turn ${entry.turn}`));
     }
     this.log.push(entry);
-    this.el.log.appendChild(h('div', { class: 'log-line' }, entry.text));
+    const line = h('div', { class: 'log-line', dataset: { i: entry.i } }, entry.text);
+    // hovering a line rings the objects it names on the board ("Cadet [dc9]": an id's first characters)
+    line.addEventListener('mouseenter', () => this.ringNamed(entry.text, true));
+    line.addEventListener('mouseleave', () => this.ringNamed(entry.text, false));
+    this.logByI.set(entry.i, { entry, el: line });
+    this.el.log.appendChild(line);
     this.scrollLog();
+  }
+
+  ringNamed(text, on) {
+    for (const m of text.matchAll(/\[([0-9a-f]{3})\]/g)) {
+      for (const el of this.board.querySelectorAll(`.card[data-id^="${m[1]}"]`)) el.classList.toggle('log-ring', on);
+    }
+  }
+
+  /** Scrolls the log to a line and flashes it (a step's "log" link). */
+  showLogLine(i) {
+    const l = this.logByI.get(i);
+    if (!l) return;
+    l.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    l.el.classList.remove('log-flash');
+    void l.el.offsetWidth;
+    l.el.classList.add('log-flash');
   }
 
   addAction(msg) {
@@ -281,8 +483,32 @@ export class GameView {
       }, rev, ' Show hands'));
     }
     const img = h('input', { type: 'checkbox', checked: settings.images });
-    img.addEventListener('change', () => { setImages(img.checked); this.cache.clear(); this.render(); });
+    img.addEventListener('change', () => { setImages(img.checked); this.cache.clear(); this.groups.clear(); this.render(); });
     controls.push(h('label', { class: 'toggle' }, img, ' Images'));
+    const size = h('input', {
+      type: 'range', class: 'card-size', min: CARD_SCALE.min, max: CARD_SCALE.max, step: CARD_SCALE.step,
+      value: settings.cardScale, 'aria-label': 'Card size',
+    });
+    const pct = h('span', { class: 'card-size-value' }, `${Math.round(settings.cardScale * 100)}%`);
+    this.el.sizeValue = pct;
+    size.addEventListener('input', () => {
+      setCardScale(parseFloat(size.value));
+      this.layout();
+    });
+    size.addEventListener('dblclick', () => { size.value = 1; size.dispatchEvent(new Event('input')); });
+    controls.push(h('label', { class: 'toggle size-control', title: 'Card size (100% fits the board to the window; double-click to reset)' },
+      'Cards ', size, pct));
+    const pace = h('select', { class: 'pace-select', 'aria-label': 'Pace of the actions shown step by step' },
+      Object.keys(PACES).map((k) => h('option', { value: k, selected: k === this.pace }, PACE_NAMES[k])));
+    pace.addEventListener('change', () => {
+      this.pace = pace.value;
+      localStorage.setItem(PACE_KEY, this.pace);
+      if (this.pace === 'off') this.skip();
+    });
+    controls.push(h('label', { class: 'toggle pace-control', title: 'Each action (a spell, an attack, damage, a card moving) is shown step by step at this pace; Off: the board just updates' },
+      'Actions ', pace));
+    this.el.skip = h('button', { class: 'btn small skip-btn hidden', title: 'Show the board as it is now (Esc)', onclick: () => this.skip() }, 'Skip ⏭');
+    controls.push(this.el.skip);
     e.header.replaceChildren(
       h('div', { class: 'side-title' }, h('a', { href: '#/' }, '←'), ' ', title),
       h('div', { class: 'side-sub mono' }, `game ${this.gameId}`, this.isPlayer ? ` · seat ${this.seat}` : ' · spectator'),
@@ -370,7 +596,16 @@ export class GameView {
       }
     }
     const s = (this.state.stack || []).find((x) => x.id === id);
-    return s ? s.name : '?';
+    return s ? s.name : (this.names.get(id) || '?');
+  }
+
+  /** Remembers the names a state shows, so that a caption can still name an object that has left it since. */
+  learnNames(st) {
+    if (!st) return;
+    for (const p of st.players || []) {
+      for (const z of ['battlefield', 'graveyard', 'hand']) for (const c of p[z] || []) if (c.name && !c.hidden) this.names.set(c.id, c.name);
+    }
+    for (const c of [...(st.stack || []), ...(st.exile || [])]) if (c.name && !c.hidden) this.names.set(c.id, c.name);
   }
 
   render() {
@@ -380,6 +615,7 @@ export class GameView {
       return;
     }
     this.el.center.textContent = '';
+    this.memberHost.clear();
     this.computeInteraction();
     const [top, bottom] = this.players();
     this.renderPlayer(top, 'top');
@@ -387,6 +623,13 @@ export class GameView {
     this.renderPhase();
     this.renderStack();
     this.renderPrompt();
+    this.layout();
+    const pin = pinnedCard();
+    if (pin) {
+      // keep a pinned explanation current (stats change while it is open)
+      const now = (this.state.players || []).flatMap((q) => q.battlefield || []).find((c) => c.id === pin.id);
+      if (now) showPreview(now, true); else hidePreview(true);
+    }
   }
 
   /** Builds per-object highlight classes, badges and click handlers for the pending decision. */
@@ -400,9 +643,17 @@ export class GameView {
     };
     this.clickable = new Map();
     this.offBoard = [];
+    // a graveyard/exile card with a known gating ability not yet legal (design-zone-play.md): the engine's own
+    // hint text, shown whenever relevant, not only while it's this viewer's priority
+    for (const p of this.state.players || []) {
+      for (const o of p.off_hand || []) {
+        if (!o.legal && o.hint) add(o.card_id, 'hinted', o.hint);
+      }
+    }
     // combat badges from the state
     for (const g of (this.state.combat && this.state.combat.groups) || []) {
-      for (const b of g.blockers || []) add(b, null, `blocks ${this.nameOf(g.attackers[0])}`);
+      // a blocker whose attacker has left combat (it died) is still blocking (506.4), with no attacker to name
+      for (const b of g.blockers || []) add(b, null, (g.attackers || []).length ? `blocks ${this.nameOf(g.attackers[0])}` : 'blocking');
       for (const a of g.attackers || []) if (g.blocked && !(g.blockers || []).length) add(a, null, 'blocked');
     }
     const d = this.decision;
@@ -479,14 +730,28 @@ export class GameView {
       ids.add(p.id);
       for (const c of p.battlefield || []) ids.add(c.id);
       for (const c of p.hand || []) ids.add(c.id);
+      // a graveyard/exile card the engine already lists a legal action for (design-zone-play.md): treated like a
+      // hand card, so it glows and answers the same way, from the same priority/target options as any other.
+      for (const o of p.off_hand || []) if (o.legal) ids.add(o.card_id);
     }
     for (const s of this.state.stack || []) ids.add(s.id);
     return ids;
   }
 
+  /**
+   * Cards this player can play from outside their hand (own graveyard, any exile, any library top), for the row
+   * beside their hand. Each entry carries its own card view from the engine (`off_hand[].card`): a library-top or
+   * another player's exiled card is never in a zone array this viewer's own state already has (graveyard/exile
+   * there are owner-filtered, libraries aren't serialized at all), so there's nothing else to look it up by.
+   */
+  offHandCards(p) {
+    return (p.off_hand || []).map((o) => o.card).filter(Boolean);
+  }
+
   cardEl(card) {
     const x = this.extras.get(card.id) || {};
     const el = renderCard(this.cache, card, x);
+    el.classList.remove('attached', 'foreign'); // set again by itemEl when it still is
     if (this.clickable.has(card.id)) el.classList.add('clickable');
     return el;
   }
@@ -503,8 +768,6 @@ export class GameView {
     const e = this.el;
     const info = where === 'top' ? e.topInfo : e.botInfo;
     const hand = where === 'top' ? e.topHand : e.botHand;
-    const lands = where === 'top' ? e.topLands : e.botLands;
-    const perms = where === 'top' ? e.topPerms : e.botPerms;
     if (!p) { info.replaceChildren(); return; }
 
     const x = this.extras.get(p.id) || { classes: [] };
@@ -520,46 +783,687 @@ export class GameView {
       h('div', { class: 'pinfo' },
         h('div', { class: 'pname' }, p.name, active ? h('span', { class: 'turn-dot', title: 'active player' }) : null),
         h('div', { class: 'pcounts' },
-          h('span', { title: 'library' }, `📚 ${p.library_count}`),
-          h('span', { title: 'hand' }, `✋ ${p.hand_count}`),
-          h('button', { class: 'linkish', onclick: (ev) => { ev.stopPropagation(); this.showZone(`${p.name}'s graveyard`, p.graveyard || []); } },
+          h('span', { class: 'z-library', title: 'library' }, `📚 ${p.library_count}`),
+          h('span', { class: 'z-hand', title: 'hand' }, `✋ ${p.hand_count}`),
+          h('button', { class: 'linkish z-graveyard', onclick: (ev) => { ev.stopPropagation(); this.showZone(`${p.name}'s graveyard`, p.graveyard || []); } },
             `⚰ ${(p.graveyard || []).length}`),
-          this.exileOf(p).length ? h('button', { class: 'linkish', onclick: (ev) => { ev.stopPropagation(); this.showZone(`Exiled (${p.name})`, this.exileOf(p)); } },
+          this.exileOf(p).length ? h('button', { class: 'linkish z-exile', onclick: (ev) => { ev.stopPropagation(); this.showZone(`Exiled (${p.name})`, this.exileOf(p)); } },
             `☄ ${this.exileOf(p).length}`) : null),
         pool.length ? h('div', { class: 'pool' }, 'pool ', pool.map(([k, n]) => manaSymbols(`{${k}}`.repeat(n)))) : null,
         counters.length ? h('div', { class: 'pcounters' }, counters.map(([k, n]) => `${k}: ${n}`).join(', ')) : null));
 
+    // graveyard/exile cards with a known off-hand ability, beside the hand (design-zone-play.md)
+    const offHandEl = where === 'top' ? e.topOffHand : e.botOffHand;
+    const offHand = this.offHandCards(p);
+    offHandEl.classList.toggle('empty', !offHand.length);
+    this.renderZone(offHandEl, offHand);
+
     // hand
     if (p.hand) {
-      const sorted = [...p.hand].sort((a, b) => (isLand(b) - isLand(a)) || ((a.mana_value || 0) - (b.mana_value || 0)));
+      const cards = where === 'bottom' ? this.orderHand(p.hand) : sortHand(p.hand);
+      const now = Date.now();
+      for (const c of cards) if ((this.newInHand.get(c.id) || 0) > now) this.addExtra(c.id, 'new-in-hand');
       hand.classList.remove('backs');
-      this.renderZone(hand, sorted);
+      this.renderZone(hand, cards);
     } else {
       hand.classList.add('backs');
       hand.replaceChildren(...Array.from({ length: Math.min(p.hand_count, 10) }, () => cardBack()));
     }
 
-    // battlefield: lands in one row, everything else (creatures first, attachments after hosts) in the other
-    const bf = p.battlefield || [];
-    const landCards = bf.filter(isLand).sort((a, b) => (a.name > b.name ? 1 : a.name < b.name ? -1 : (a.tapped - b.tapped)));
-    const others = bf.filter((c) => !isLand(c));
-    const hostHere = (c) => c.attached_to && others.some((o) => o.id === c.attached_to);
-    const hosts = others.filter((c) => !hostHere(c));
-    hosts.sort((a, b) => (isCreature(b) - isCreature(a)));
-    const ordered = [];
-    for (const c of hosts) {
-      ordered.push(c);
-      for (const a of others) if (a.attached_to === c.id) ordered.push(a);
-    }
-    // untapped lands with the same name are drawn as a pile; auras/equipment tuck under their host
-    landCards.forEach((c, i) => {
-      if (i > 0 && !c.tapped && !landCards[i - 1].tapped && landCards[i - 1].name === c.name) this.addExtra(c.id, 'stacked');
-    });
-    ordered.forEach((c) => { if (hostHere(c)) this.addExtra(c.id, 'attached'); });
-    this.renderZone(lands, landCards);
-    this.renderZone(perms, ordered);
+    this.renderBattlefield(p, where);
   }
 
+  /**
+   * This player's hand in a stable order, as in Arena: sorted until the game starts (the opening hand, through the
+   * mulligans) and when the page loads; from then on, every card that arrives (a draw, a card returned to hand) is
+   * added at the right end, where it is highlighted for a moment, and the other cards keep their places.
+   */
+  orderHand(cards) {
+    const ids = new Set(cards.map((c) => c.id));
+    const kept = (this.handOrder || []).filter((id) => ids.has(id));
+    const arrived = cards.filter((c) => !kept.includes(c.id));
+    if (this.handOrder === null || !this.state.step) { // no step yet: the mulligans
+      this.handOrder = sortHand(cards).map((c) => c.id);
+      this.newInHand.clear();
+    } else {
+      this.handOrder = [...kept, ...arrived.map((c) => c.id)];
+      if (arrived.length) {
+        const until = Date.now() + NEW_IN_HAND_MS;
+        for (const c of arrived) this.newInHand.set(c.id, until);
+        clearTimeout(this.newInHandTimer);
+        this.newInHandTimer = setTimeout(() => { if (!this.destroyed) this.render(); }, NEW_IN_HAND_MS + 50);
+      }
+    }
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    return this.handOrder.map((id) => byId.get(id));
+  }
+
+  /**
+   * Lays out one player's battlefield: creatures in one row, lands and the other permanents in their own areas.
+   * Auras and equipment stay with what they are attached to (whoever controls them); identical tokens are
+   * stacked with a count.
+   */
+  renderBattlefield(p, where) {
+    const e = this.el;
+    const all = (this.state.players || []).flatMap((q) => q.battlefield || []);
+    const onField = new Set(all.map((c) => c.id));
+    const isAttached = (c) => c.attached_to && onField.has(c.attached_to) && c.attached_to !== c.id;
+    const attachmentsOf = (c) => all.filter((a) => a.attached_to === c.id && isAttached(a));
+    const bf = (p.battlefield || []).filter((c) => !isAttached(c));
+    const creatures = bf.filter(isCreature);
+    const lands = bf.filter((c) => isLand(c)).sort((a, b) => (a.name > b.name ? 1 : a.name < b.name ? -1 : (a.tapped - b.tapped)));
+    const others = bf.filter((c) => !isCreature(c) && !isLand(c));
+    // lands with the same name and tapped state are drawn as a pile
+    lands.forEach((c, i) => {
+      if (i > 0 && lands[i - 1].tapped === c.tapped && lands[i - 1].name === c.name && !attachmentsOf(c).length) this.addExtra(c.id, 'stacked');
+    });
+    const lands2 = where === 'top' ? e.topLands : e.botLands;
+    const others2 = where === 'top' ? e.topOthers : e.botOthers;
+    const creatures2 = where === 'top' ? e.topCreatures : e.botCreatures;
+    this.renderItems(creatures2, this.items(creatures, attachmentsOf, p));
+    this.renderItems(lands2, this.items(lands, attachmentsOf, p, false));
+    this.renderItems(others2, this.items(others, attachmentsOf, p));
+    others2.classList.toggle('empty', !others.length);
+    (where === 'top' ? e.topPerm : e.botPerm).classList.toggle('empty', !lands.length && !others.length);
+  }
+
+  /** Display items for a row: a card, a card with its attachments, or a stack of identical tokens. */
+  items(cards, attachmentsOf, owner, stackTokens = true) {
+    const out = [];
+    const stacks = new Map();
+    for (const c of cards) {
+      const atts = attachmentsOf(c);
+      if (atts.length) {
+        out.push({ key: `att:${c.id}`, host: c, attachments: atts, owner });
+        continue;
+      }
+      if (stackTokens && c.token) {
+        const x = this.extras.get(c.id) || {};
+        const k = JSON.stringify([c.name, c.power, c.toughness, c.tapped, c.damage, c.counters, c.summoning_sick,
+          c.attacking, c.blocking, c.explain, x.classes, x.badges, this.clickable.has(c.id)]);
+        if (stacks.has(k)) { stacks.get(k).members.push(c); this.memberHost.set(c.id, stacks.get(k).host.id); continue; }
+        const item = { key: null, host: c, members: [c], owner };
+        stacks.set(k, item);
+        out.push(item);
+        continue;
+      }
+      out.push({ key: null, host: c, owner });
+    }
+    for (const it of out) if (it.members && it.members.length > 1) it.key = `stk:${it.host.id}`;
+    return out;
+  }
+
+  itemEl(it) {
+    const host = this.cardEl(it.host);
+    if (!it.key) return host;
+    let w = this.groups.get(it.key);
+    if (!w) {
+      w = h('div', { dataset: { group: it.key } });
+      this.groups.set(it.key, w);
+    }
+    let kids;
+    if (it.attachments) {
+      w.className = 'attach-group';
+      kids = [...it.attachments.map((a) => {
+        const el = this.cardEl(a);
+        el.classList.add('attached');
+        el.classList.toggle('foreign', a.controller !== it.host.controller);
+        el.title = a.controller !== it.host.controller ? `${a.name} (controlled by ${this.nameOf(a.controller)})` : '';
+        return el;
+      }), host];
+    } else {
+      w.className = 'token-stack';
+      w.dataset.count = it.members.length;
+      w.title = `${it.members.length} × ${it.host.name}`;
+      let badge = w.querySelector(':scope > .stack-count');
+      if (!badge) badge = h('span', { class: 'stack-count' });
+      badge.textContent = `×${it.members.length}`;
+      kids = [host, badge];
+    }
+    if (kids.some((k, i) => w.children[i] !== k) || w.children.length !== kids.length) w.replaceChildren(...kids);
+    return w;
+  }
+
+  renderItems(container, items) {
+    const els = items.map((it) => this.itemEl(it));
+    const current = Array.from(container.children);
+    els.forEach((el, i) => { if (current[i] !== el) container.insertBefore(el, container.children[i] || null); });
+    while (container.children.length > els.length) container.lastChild.remove();
+  }
+
+  // --- what happens, step by step ---------------------------------------------------------------------
+
+  /**
+   * Every state, event, decision and result goes through here, in the order it came. With nothing being shown
+   * and nothing to show (a plain state, a decision), or at pace Off, it goes straight onto the board; otherwise it
+   * waits for the steps before it. A step shows the engine's own view right after its event, with what happened
+   * drawn over it for a moment; the board always ends on the latest state, and Skip goes there at once.
+   */
+  enqueue(frame) {
+    const ev = frame.event;
+    if (ev && ['cast', 'ability', 'trigger'].includes(ev.kind) && this.pace !== 'off') {
+      // its step shows the card large: fetch the picture while the steps before it play
+      const so = (frame.state.stack || []).find((x) => x.id === ev.id);
+      const url = so && imageUrl(so.kind === 'ability' ? (this.findCard(ev.source_id, frame.state) || so) : so);
+      if (url) new Image().src = url;
+    }
+    if (ev && ev.kind === 'reveal' && this.pace !== 'off') {
+      for (const id of (ev.ids || []).slice(0, REVEAL_CARDS)) {
+        const url = imageUrl(this.findCard(id, frame.state) || {});
+        if (url) new Image().src = url;
+      }
+    }
+    if (this.pace === 'off' || (!this.playing && !this.queue.length && !frame.event)) {
+      this.applyBatch([frame], false);
+      return;
+    }
+    this.queue.push(frame);
+    if (!this.playing) {
+      // events of one engine action arrive together: let them in before building the step
+      this.playing = true;
+      this.stepTimer = setTimeout(() => this.playNext(), 40);
+    }
+    this.renderSkip();
+  }
+
+  playNext() {
+    clearTimeout(this.stepTimer);
+    if (!this.queue.length) {
+      this.playing = false;
+      this.renderSkip();
+      return;
+    }
+    this.playing = true;
+    const batch = [this.queue.shift()];
+    while (this.queue.length && joins(batch, this.queue[0])) batch.push(this.queue.shift());
+    const ms = this.applyBatch(batch, true);
+    this.renderSkip();
+    this.stepTimer = setTimeout(() => this.playNext(), ms);
+  }
+
+  /** Shows the board as it is now: every waiting frame applied at once, without its visual step. */
+  skip() {
+    clearTimeout(this.stepTimer);
+    const rest = this.queue.splice(0);
+    this.fx.clear();
+    this.markLog([]);
+    this.playing = false;
+    if (rest.length) this.applyBatch(rest, false);
+    this.renderSkip();
+  }
+
+  renderSkip() {
+    const b = this.el.skip;
+    if (!b) return;
+    const n = this.queue.filter((f) => f.event && stepKey(f.event) !== 'to-stack').length;
+    b.classList.toggle('hidden', !this.playing && !this.queue.length);
+    b.textContent = n ? `Skip ⏭ ${n}` : 'Skip ⏭';
+  }
+
+  /** Applies frames (their states, a decision, the result) and renders; returns how long the step stays (ms). */
+  applyBatch(batch, show) {
+    const events = batch.filter((f) => f.event).map((f) => f.event);
+    const before = show && events.length ? this.boxesOf(events) : null;
+    const prev = this.state;
+    let decided = false;
+    let ended = false;
+    for (const f of batch) {
+      if (f.state) {
+        this.state = f.state;
+        this.learnNames(f.state);
+      }
+      if (f.decision && !(this.sent && this.sent.decision_id === f.decision.decision_id)) {
+        this.decision = f.decision;
+        this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
+        decided = true;
+      }
+      if (f.result) {
+        this.result = f.result;
+        this.decision = null;
+        ended = true;
+      }
+    }
+    if (show) this.fx.clear();
+    this.render();
+    if (decided) this.autoOpen();
+    if (ended) this.showResult();
+    if (!show || !events.length || !prev) return 0;
+    return this.showStep(events, prev, before);
+  }
+
+  /** How much faster steps go when they pile up, or when a decision of this player waits behind them. */
+  catchUp() {
+    const waiting = this.queue.filter((f) => f.event).reduce((ms, f) => ms + (STEP_MS[stepKey(f.event)] || 0) * PACES[this.pace], 0);
+    const k = waiting > LAG_MS ? LAG_MS / waiting : 1;
+    return this.queue.some((f) => f.decision || f.result) ? k * 0.75 : k;
+  }
+
+  /** Draws one step over the board (rendered at the step's state) and links it to its log lines; returns its length. */
+  showStep(events, prev, before) {
+    const st = this.state;
+    const you = st.you;
+    const shown = events.filter((e) => stepKey(e) !== 'to-stack');
+    const ev = shown[0] || events[0];
+    const key = stepKey(ev);
+    const actor = ev.player || ev.owner;
+    let ms = (STEP_MS[key] || STEP_MS.move) * PACES[this.pace] * this.catchUp() * (actor && actor === you ? OWN_K : 1);
+    if (key === 'to-stack') ms = 0;
+    if (key === 'reveal') ms *= Math.min(2, 1 + 0.2 * ((ev.ids || []).length - 1)); // more cards, more time to see them
+    if (!ms) return 0;
+    ms = Math.max(MIN_STEP_MS, ms);
+    const known = (id) => this.nameIn(id, st) || this.nameIn(id, prev) || this.names.get(id) || null;
+    const name = (id) => known(id) || 'a card';
+    const pname = (id) => (((st.players || []).find((p) => p.id === id) || {}).name) || '';
+    const box = (id) => this.fx.rect(this.elementOf(id));
+    const list = (ids) => ids.map(name).join(', ');
+    let text = '';
+    switch (key) {
+      case 'cast': {
+        const so = (st.stack || []).find((x) => x.id === ev.id) || (st.stack || []).find((x) => x.card_id === ev.card_id);
+        const card = so ? { ...so, hidden: false } : this.findCard(ev.card_id, st) || { name: name(ev.id) };
+        const targets = ev.targets || [];
+        text = `${pname(ev.player)} casts ${card.name}` + (targets.length ? ` → ${list(targets)}` : '');
+        const from = this.fx.spotlight(this.fxCard(card), `${pname(ev.player)} casts`, targets.length ? `→ ${list(targets)}` : null, ms,
+          this.fx.rect(this.el.stack));
+        for (const t of targets) this.fx.arrow(from, box(t), 'target', ms);
+        for (const t of targets) this.fx.mark(this.elementOf(t), 'fx-targeted', ms);
+        break;
+      }
+      case 'trigger':
+      case 'ability': {
+        const so = (st.stack || []).find((x) => x.id === ev.id) || (st.stack || []).find((x) => x.source_id === ev.source_id) || {};
+        const src = this.findCard(ev.source_id, st) || this.findCard(ev.source_id, prev)
+          || { name: so.source_name || name(ev.source_id), set: so.set, number: so.number };
+        const targets = ev.targets || [];
+        const title = key === 'trigger' ? `${src.name} triggers` : `${pname(ev.player)} activates ${src.name}`;
+        text = title + (targets.length ? ` → ${list(targets)}` : '');
+        const rule = (so.rules || [])[0] || '';
+        const at = this.fx.spotlight(this.fxCard(src), title, rule.length > 150 ? `${rule.slice(0, 147)}…` : rule, ms,
+          this.fx.rect(this.el.stack));
+        const srcEl = this.elementOf(ev.source_id);
+        this.fx.mark(srcEl, 'fx-source', ms);
+        this.fx.arrow(this.fx.rect(srcEl), at, 'source', ms);
+        for (const t of targets) this.fx.arrow(at, box(t), 'target', ms);
+        break;
+      }
+      case 'attack': {
+        for (const e of shown) this.fx.arrow(box(e.attacker), box(e.defender), 'attack', ms);
+        text = `${pname(ev.player)} attacks with ${list(shown.map((e) => e.attacker))}`;
+        break;
+      }
+      case 'block': {
+        for (const e of shown) this.fx.arrow(box(e.blocker), box(e.attacker), 'block', ms);
+        text = `${pname(ev.player)} blocks: ${shown.map((e) => `${name(e.blocker)} → ${name(e.attacker)}`).join(', ')}`;
+        break;
+      }
+      case 'hit': {
+        const damaged = new Set();
+        for (const e of shown.filter((x) => x.kind === 'damage')) {
+          damaged.add(e.target);
+          this.fx.float(box(e.target), `−${e.amount}`, 'damage', ms);
+          this.fx.mark(this.elementOf(e.target), 'fx-hit', ms);
+          if (!e.combat) this.fx.arrow(box(e.source), box(e.target), 'damage', ms);
+        }
+        // life changes the damage doesn't account for: any gain, a loss of a player who wasn't dealt damage
+        const life = shown.filter((x) => x.kind === 'life' && !(x.amount < 0 && damaged.has(x.player)));
+        for (const e of life) {
+          this.fx.float(box(e.player), e.amount > 0 ? `+${e.amount}` : `−${-e.amount}`, e.amount > 0 ? 'gain' : 'damage', ms);
+        }
+        const dmg = shown.filter((x) => x.kind === 'damage');
+        const parts = [];
+        if (dmg.length && dmg.every((x) => x.combat)) parts.push(`Combat damage: ${dmg.map((x) => `${name(x.source)} → ${name(x.target)} ${x.amount}`).join(', ')}`);
+        else if (dmg.length) parts.push(dmg.map((x) => `${name(x.source)} deals ${x.amount} damage to ${name(x.target)}`).join(', '));
+        if (life.length) parts.push(life.map((x) => `${pname(x.player)} ${x.amount > 0 ? 'gains' : 'loses'} ${Math.abs(x.amount)} life`).join(', '));
+        text = parts.join(' · ');
+        break;
+      }
+      case 'countered': {
+        if (ev.kind === 'move') { // a spell countered or fizzled: its card leaves the stack, stamped
+          text = this.showMoves(shown, prev, before, ms, name, pname);
+          break;
+        }
+        // an ability or a copy of a spell: nothing moves, it is just gone from the stack
+        const so = [...(prev.stack || []), ...(st.stack || [])].find((x) => x.id === ev.id);
+        const source = known(ev.source_id) || (so && so.source_name);
+        let what = source ? `${source}'s ability` : 'An ability';
+        if (ev.copy) what = so ? `A copy of ${so.name}` : 'A copy of a spell';
+        text = `${what} is countered` + (ev.by ? ` by ${name(ev.by)}` : '');
+        this.fx.mark(this.elementOf(ev.source_id), 'fx-targeted', ms);
+        break;
+      }
+      case 'reveal': { // the cards a player revealed, large: public now, whatever zone they are in
+        const cards = (ev.ids || []).map((id) => ({ ...(this.findCard(id, st) || { id, name: name(id) }), hidden: false }));
+        const shown = cards.slice(0, REVEAL_CARDS);
+        const more = cards.length > shown.length ? ` and ${cards.length - shown.length} more` : '';
+        text = `${pname(ev.player)} reveals ${shown.map((c) => c.name).join(', ')}${more}`;
+        const row = h('div', { class: 'fx-reveal' }, ...shown.map((c) => this.fxCard(c)));
+        this.fx.spotlight(row, `${pname(ev.player)} reveals`, more ? more.trim() : null, ms, this.fx.rect(this.el.stack));
+        for (const id of ev.ids || []) this.fx.mark(this.elementOf(id), 'fx-targeted', ms);
+        break;
+      }
+      default: // moves: leave, draw, move
+        text = this.showMoves(shown, prev, before, ms, name, pname);
+    }
+    this.fx.caption(text, [], (i) => this.showLogLine(i), ms);
+    // log lines arrive just before or after their event: link them once they are in
+    clearTimeout(this.linkTimer);
+    this.linkTimer = setTimeout(() => {
+      const lines = this.logLinesOf(events, known);
+      this.markLog(lines);
+      const cap = this.fx.layer.querySelector('.fx-caption');
+      if (cap) for (const i of lines) cap.appendChild(h('button', { class: 'fx-log-link', title: 'Show this line in the log', onclick: (e) => { e.stopPropagation(); this.showLogLine(i); } }, `log ${i}`));
+    }, 80);
+    return ms;
+  }
+
+  /** Cards moving between zones: each flies from where it was to where it goes. Returns the caption. */
+  showMoves(moves, prev, before, ms, name, pname) {
+    const texts = []; // the caption's phrases; a player's draws make one, written once all are known
+    const draws = new Map(); // owner -> the cards it draws in this step (null: a card the viewer doesn't see)
+    const drew = (owner) => {
+      const cards = draws.get(owner);
+      if (cards.length === 1) return `${pname(owner)} draws ${cards[0] || 'a card'}`;
+      return `${pname(owner)} draws ${cards.length <= 3 && cards.every(Boolean) ? cards.join(', ') : `${cards.length} cards`}`;
+    };
+    for (const e of moves) {
+      const owner = e.owner;
+      const card = (e.id && (this.findCard(e.id, this.state) || this.findCard(e.id, prev))) || null;
+      const from = (e.id && before && before.get(e.id)) || this.fx.rect(this.anchorOf(e.from, owner));
+      const toEl = e.id ? this.elementOf(e.id) : null;
+      const to = (toEl && e.to !== 'GRAVEYARD' && e.to !== 'EXILED' && e.to !== 'LIBRARY' && this.fx.rect(toEl)) || this.fx.rect(this.anchorOf(e.to, owner));
+      const what = card && !e.hidden ? card.name : null;
+      if (e.from === 'OUTSIDE' || (e.token && e.to === 'BATTLEFIELD' && e.from !== 'STACK')) {
+        this.fx.mark(toEl, 'fx-pop', ms);
+        texts.push(`${what || 'A token'} is created`);
+        continue;
+      }
+      const flying = card && !e.hidden ? this.fxCard(card) : cardBack();
+      if (e.from === 'STACK' && ['countered', 'fizzled'].includes(e.reason)) {
+        flying.appendChild(h('div', { class: 'fx-stamp' }, e.reason === 'fizzled' ? 'Fizzled' : 'Countered'));
+      }
+      this.fx.ghost(flying, from, to, ms);
+      if (e.to === 'BATTLEFIELD' && toEl) this.fx.mark(toEl, 'fx-pop', ms);
+      const where = ZONE_NAMES[e.to] || (e.to || '').toLowerCase();
+      if (e.from === 'LIBRARY' && e.to === 'HAND' && e.reason === 'draw') {
+        if (!draws.has(owner)) {
+          draws.set(owner, []);
+          texts.push(() => drew(owner));
+        }
+        draws.get(owner).push(what);
+      } else if (e.from === 'LIBRARY' && e.to === 'HAND') texts.push(`${pname(owner)} puts ${what || 'a card'} from library into hand`);
+      else if (e.from === 'HAND' && e.to === 'BATTLEFIELD') {
+        texts.push(e.reason === 'played' ? `${pname(owner)} plays ${what || 'a card'}` : `${pname(owner)} puts ${what || 'a card'} onto the battlefield`);
+      } else if (e.from === 'STACK') texts.push(this.leftStack(e, what || 'A spell', where, name));
+      else if (e.from === 'BATTLEFIELD' && e.to === 'GRAVEYARD') texts.push(`${what || 'A card'} → graveyard`);
+      else texts.push(`${what || 'A card'} → ${where}`);
+    }
+    return texts.map((t) => (typeof t === 'function' ? t() : t)).join(' · ');
+  }
+
+  /**
+   * What became of a spell leaving the stack, as the engine says (the move's reason): only a spell that resolved
+   * "resolves"; one countered says by what, one that fizzled says why. Without a reason, only where it went.
+   */
+  leftStack(e, what, where, name) {
+    switch (e.reason) {
+      case 'resolved': return e.to === 'BATTLEFIELD' ? `${what} enters the battlefield` : `${what} resolves → ${where}`;
+      case 'countered': return `${what} is countered${e.by ? ` by ${name(e.by)}` : ''} → ${where}`;
+      case 'fizzled': return `${what} fizzles: no legal target → ${where}`;
+      default: return `${what} → ${where}`;
+    }
+  }
+
+  /**
+   * The log lines of a step's events. XMage writes an event's line just before or just after it (log_at: the index
+   * the next line gets) and in its own words (LINE_KINDS). Each event links the nearest line of its kind that names
+   * its object, by the first characters of the object's id ("Cadet [ad4] died"), or by the player's or the card's
+   * name where XMage writes no id ("Opp draws a card", "Opp puts a card from library into their hand", "Opp reveals
+   * Swamp", "Last Gasp has been fizzled."). A line about something else is never linked: an event whose line isn't
+   * found links none.
+   */
+  logLinesOf(events, name) {
+    const out = new Set();
+    for (const ev of events) {
+      if (ev.log_at === undefined || stepKey(ev) === 'to-stack') continue;
+      for (const want of linesOf(ev, name)) {
+        const i = this.nearestLine(ev.log_at, want);
+        if (i !== null) out.add(i);
+      }
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+
+  /** The line nearest to log_at that is one of want.kinds and passes want.test: just after the event first. */
+  nearestLine(at, want) {
+    for (let d = 0; d < want.reach; d++) {
+      for (const i of [at + d, at - 1 - d]) {
+        const l = this.logByI.get(i);
+        if (!l) continue;
+        const kind = lineKind(l.entry.text);
+        if (want.kinds.includes(kind) && want.test(l.entry.text, kind)) return i;
+      }
+    }
+    return null;
+  }
+
+  /** Highlights the log lines of the step being shown (and scrolls to them when the log is at its end). */
+  markLog(lines) {
+    for (const el of this.el.log.querySelectorAll('.log-now')) el.classList.remove('log-now');
+    for (const i of lines) {
+      const l = this.logByI.get(i);
+      if (l) l.el.classList.add('log-now');
+    }
+  }
+
+  /** Where objects of a step's events are before it is applied (cards leave the board as the state changes). */
+  boxesOf(events) {
+    const boxes = new Map();
+    for (const e of events) {
+      if (e.kind === 'move' && e.id) {
+        const b = this.fx.rect(this.elementOf(e.id));
+        if (b) boxes.set(e.id, b);
+      }
+    }
+    return boxes;
+  }
+
+  /** The board element that shows an object: a card, a stack of identical tokens, a player's avatar. */
+  elementOf(id) {
+    if (!id) return null;
+    const avatar = this.board.querySelector(`.player-info[data-id="${id}"] .avatar`);
+    if (avatar) return avatar;
+    return this.board.querySelector(`.card[data-id="${id}"]`)
+      || (this.memberHost.has(id) ? this.board.querySelector(`.card[data-id="${this.memberHost.get(id)}"]`) : null);
+  }
+
+  /** Where a zone of a player is on the board, for cards moving to or from it. */
+  anchorOf(zone, owner) {
+    const info = this.board.querySelector(`.player-info[data-id="${owner}"]`) || this.el.topInfo;
+    const top = info.classList.contains('top');
+    const pick = (...els) => els.find((el) => el && el.getBoundingClientRect().width > 0) || info.querySelector('.avatar');
+    switch (zone) {
+      case 'GRAVEYARD': return pick(info.querySelector('.z-graveyard'));
+      case 'EXILED': return pick(info.querySelector('.z-exile'), info.querySelector('.z-graveyard'));
+      case 'LIBRARY': return pick(info.querySelector('.z-library'));
+      case 'HAND': return pick(top ? this.el.topHand : this.el.botHand, info.querySelector('.z-hand'));
+      case 'STACK': return pick(this.el.stack, this.el.phase);
+      case 'BATTLEFIELD': return pick(top ? this.el.topCreatures : this.el.botCreatures);
+      default: return info.querySelector('.avatar');
+    }
+  }
+
+  /** A card's data in a state: on a battlefield, in a graveyard or hand, in exile or on the stack. */
+  findCard(id, st) {
+    if (!id || !st) return null;
+    for (const p of st.players || []) {
+      for (const z of ['battlefield', 'graveyard', 'hand']) {
+        const c = (p[z] || []).find((x) => x.id === id);
+        if (c) return c;
+      }
+    }
+    return (st.exile || []).find((x) => x.id === id) || (st.stack || []).find((x) => x.id === id || x.card_id === id)
+      || (st.revealed || []).flatMap((r) => r.cards || []).find((x) => x.id === id) || null;
+  }
+
+  nameIn(id, st) {
+    if (!id || !st) return null;
+    const p = (st.players || []).find((x) => x.id === id);
+    if (p) return p.name;
+    const c = this.findCard(id, st);
+    return c ? c.name : null;
+  }
+
+  /** A card for a visual step: drawn as on the board, outside the board's own cards. */
+  fxCard(card) {
+    // upright and plain: the board shows its state (tapped, attacking, damage)
+    const el = renderCard(new Map(), { ...card, id: `fx-${card.id || card.name}`, hidden: false, tapped: false, attacking: false,
+      blocking: false, summoning_sick: false, damage: 0 });
+    el.classList.add('fx-card');
+    const img = el.querySelector('img');
+    if (img) img.loading = 'eager'; // shown at once, outside the page's flow
+    return el;
+  }
+
+  // --- sizing ----------------------------------------------------------------------------------------
+
+  /**
+   * Sizes the board to the window and to what is on it. Each player's battlefield is a creature row and, when
+   * there are any, a row of lands and other permanents; that second row goes beside the creatures when the
+   * width allows ("beside"), else behind them. The card width is the largest at which every row fits the board
+   * (vertically, and horizontally for rows beside each other), within CARD_MIN..CARD_MAX: this is 100 % on the
+   * player's size control. Other values scale it; when a larger size would not fit, the lands, other permanents
+   * and the hand shrink first (to LAND_K.min, HAND_K.min), and past that the size is capped so that both
+   * creature rows always stay in view, at their full width. --ui scales the rest of the interface (text, buttons, panels).
+   */
+  layout() {
+    if (!this.board) return;
+    const root = document.documentElement.style;
+    const ui = Math.min(2.2, Math.max(0.85, Math.min(window.innerWidth / 1920, window.innerHeight / 1080)));
+    root.setProperty('--ui', ui.toFixed(3));
+    const m = this.measure();
+    if (!m) return;
+    const configs = [];
+    for (const top of m.top.has ? [false, true] : [false]) {
+      for (const bottom of m.bottom.has ? [false, true] : [false]) configs.push({ top, bottom });
+    }
+    const kAt = (t) => [LAND_K.min + t * (LAND_K.max - LAND_K.min), HAND_K.min + t * (HAND_K.max - HAND_K.min)];
+    // largest width (0: none) / largest share t of the lands' and hand's full size (-1: none) that fits
+    const maxW = (cfg, t, strict) => {
+      const [k, hk] = kAt(t);
+      if (!fits(m, CARD_MIN, k, hk, cfg, strict)) return 0;
+      let lo = CARD_MIN, hi = CARD_MAX;
+      if (fits(m, hi, k, hk, cfg, strict)) return hi;
+      while (hi - lo > 0.5) { const mid = (lo + hi) / 2; if (fits(m, mid, k, hk, cfg, strict)) lo = mid; else hi = mid; }
+      return lo;
+    };
+    const maxT = (cfg, w) => {
+      if (!fits(m, w, ...kAt(0), cfg, false)) return -1;
+      if (fits(m, w, ...kAt(1), cfg, false)) return 1;
+      let lo = 0, hi = 1;
+      while (hi - lo > 0.01) { const mid = (lo + hi) / 2; if (fits(m, w, ...kAt(mid), cfg, false)) lo = mid; else hi = mid; }
+      return lo;
+    };
+    // 100 %: the configuration with the largest cards at full-size lands and hand, rows not squeezed
+    let auto = 0;
+    let autoCfg = configs[0];
+    for (const strict of [true, false]) {
+      for (const cfg of configs) { const w = maxW(cfg, 1, strict); if (w > auto) { auto = w; autoCfg = cfg; } }
+      if (auto) break;
+    }
+    auto = auto || CARD_MIN;
+    const target = Math.min(CARD_MAX, Math.max(CARD_MIN, auto * settings.cardScale));
+    const beside = (cfg) => +cfg.top + +cfg.bottom;
+    let best = null;
+    for (const cfg of configs) {
+      const t = maxT(cfg, target);
+      if (t < 0) continue;
+      if (!best || t > best.t + 0.005 || (Math.abs(t - best.t) <= 0.005
+        && (cfg === autoCfg || (best.cfg !== autoCfg && beside(cfg) > beside(best.cfg))))) best = { cfg, t, w: target };
+    }
+    if (!best) {
+      // too large for this window even with small lands and hand: the largest size that keeps the creatures in view
+      best = { cfg: configs[0], t: 0, w: 0 };
+      for (const cfg of configs) { const w = maxW(cfg, 0, false); if (w > best.w) best = { cfg, t: 0, w }; }
+      if (best.w) best.t = Math.max(0, maxT(best.cfg, best.w));
+      else best.w = CARD_MIN; // a tiny window: the sides scroll
+    }
+    let [k, hk] = kAt(best.t);
+    // the shared shrink may be more than one of them needs (the lands' width, say, not the board's height):
+    // grow the hand, then the lands, back as far as they fit
+    const grow = (lo, hi, ok) => { if (ok(hi)) return hi; for (let i = 0; i < 12; i++) { const mid = (lo + hi) / 2; if (ok(mid)) lo = mid; else hi = mid; } return lo; };
+    hk = grow(hk, HAND_K.max, (x) => fits(m, best.w, k, x, best.cfg, false));
+    k = grow(k, LAND_K.max, (x) => fits(m, best.w, x, hk, best.cfg, false));
+    root.setProperty('--card-w', `${Math.floor(best.w)}px`);
+    root.setProperty('--land-k', (Math.floor(k * 1000) / 1000).toFixed(3));
+    root.setProperty('--hand-k', (Math.floor(hk * 1000) / 1000).toFixed(3));
+    this.el.topSide.classList.toggle('beside', best.cfg.top);
+    this.el.botSide.classList.toggle('beside', best.cfg.bottom);
+    const pct = this.el.sizeValue;
+    if (pct) {
+      const capped = best.w < target - 1;
+      pct.textContent = capped ? `${Math.round((best.w / auto) * 100)}% max` : `${Math.round(settings.cardScale * 100)}%`;
+      pct.classList.toggle('capped', capped);
+      pct.title = capped ? 'The largest size at which both creature rows fit this window' : '';
+    }
+    this.board.dataset.layout = JSON.stringify({ w: Math.floor(best.w), auto: Math.round(auto), land_k: +k.toFixed(3),
+      hand_k: +hk.toFixed(3), beside: best.cfg });
+    this.squeeze();
+  }
+
+  /**
+   * Measures what the sizing needs: the board's free height and width, and each player's creature row and
+   * land/other row. Rows are laid out once at two card widths with nothing shrunk; their sizes are linear in the
+   * card width (cards scale, gaps don't), so two measurements give them at any width.
+   */
+  measure() {
+    const b = this.board;
+    const e = this.el;
+    const H = b.clientHeight;
+    if (!H || !b.clientWidth) return null;
+    const box = (el) => el.getBoundingClientRect();
+    for (const z of b.querySelectorAll('.zone, .hand-row')) z.style.removeProperty('--fit');
+    b.classList.add('measuring');
+    const rows = { top: [e.topCreatures, e.topPerm], bottom: [e.botCreatures, e.botPerm] };
+    const read = (px) => {
+      b.style.setProperty('--card-w', `${px}px`);
+      const out = {};
+      for (const [s, [c, p]] of Object.entries(rows)) { const rc = box(c), rp = box(p); out[s] = [rc.width, rc.height, rp.width, rp.height]; }
+      return out;
+    };
+    const r1 = read(100);
+    const r2 = read(200);
+    b.style.removeProperty('--card-w');
+    box(b); // settle the current size before transitions are back on, so nothing animates from the measured one
+    b.classList.remove('measuring');
+    const lin = (v1, v2) => ({ a: (v2 - v1) / 100, b: 2 * v1 - v2 }); // v(w) = a w + b
+    const m = {
+      avail: H - box(e.middle).height - box(e.prompt).height - (e.banner.classList.contains('hidden') ? 0 : box(e.banner).height + 8)
+        - 2 * SIDE_PAD - FIT_SLACK,
+      W: b.clientWidth - 24 - 4, // less a little for rounding
+      Itop: box(e.topInfoHand).height,
+      Ibot: box(e.botInfo).height,
+    };
+    for (const s of ['top', 'bottom']) {
+      const [a, z] = [r1[s], r2[s]];
+      m[s] = { has: !(s === 'top' ? e.topPerm : e.botPerm).classList.contains('empty'),
+        cw: lin(a[0], z[0]), ch: lin(a[1], z[1]), pw: lin(a[2], z[2]), ph: lin(a[3], z[3]) };
+    }
+    return m;
+  }
+
+  /** Shrinks the cards of any row that would not fit its width, instead of wrapping it onto a second line. */
+  squeeze() {
+    for (const row of this.root.querySelectorAll('.zone, .hand-row.bottom')) {
+      row.style.removeProperty('--fit');
+      if (!row.children.length) continue;
+      // gaps and margins don't shrink with the cards: converge in a few measured steps
+      let fit = 1;
+      for (let i = 0; i < 4 && row.scrollWidth > row.clientWidth + 1 && fit > 0.35; i++) {
+        fit = Math.max(0.35, fit * 0.98 * row.clientWidth / row.scrollWidth);
+        row.style.setProperty('--fit', fit.toFixed(3));
+      }
+    }
+  }
   addExtra(id, cls) {
     if (!this.extras.has(id)) this.extras.set(id, { classes: [], badges: [] });
     this.extras.get(id).classes.push(cls);
@@ -622,8 +1526,10 @@ export class GameView {
     if (!d) {
       bar.className = 'prompt-bar idle';
       const opp = this.players()[0];
+      const yours = this.queue.some((f) => f.decision);
       bar.replaceChildren(h('span', { class: 'prompt-text muted' },
-        this.sent ? 'Waiting…' : opp ? `Waiting for ${opp.name}…` : 'Waiting…'));
+        yours ? 'Your decision comes after these steps (Esc shows it now)…'
+          : this.sent ? 'Waiting…' : opp ? `Waiting for ${opp.name}…` : 'Waiting…'));
       return;
     }
     bar.className = 'prompt-bar active';
@@ -649,11 +1555,16 @@ export class GameView {
         else text.appendChild(h('span', { class: 'hint' }, ' — click a highlighted card to play it'));
         break;
       }
-      case 'mulligan':
-        text.textContent = `${d.prompt} (hand of ${d.hand_size})`;
+      case 'mulligan': {
+        // keep-first seats see the new seven and learn how many go to the bottom if they keep (bottom_on_keep)
+        const n = d.bottom_on_keep || 0;
+        text.textContent = n
+          ? `${d.prompt} If you keep, you put ${n} of these ${d.hand_size} cards on the bottom of your library.`
+          : `${d.prompt} (hand of ${d.hand_size})`;
         btn('Mulligan', () => this.answer({ choice: 'mulligan' }));
-        btn('Keep', () => this.answer({ choice: 'keep' }), 'primary');
+        btn(n ? `Keep ${d.hand_size - n}` : 'Keep', () => this.answer({ choice: 'keep' }), 'primary');
         break;
+      }
       case 'declare_attackers': {
         const n = this.local.attackers.size;
         text.appendChild(h('span', { class: 'hint' }, ' — click creatures to toggle attackers'));
@@ -741,17 +1652,29 @@ export class GameView {
 
   onBoardClick(ev) {
     const target = ev.target.closest('[data-id]');
-    if (!target) return;
+    if (!target) { hidePreview(true); return; }
     const id = target.dataset.id;
     const fn = this.clickable && this.clickable.get(id);
     if (fn) {
       ev.stopPropagation();
-      hidePreview();
+      hidePreview(true);
       fn(target);
+      return;
     }
+    // a click on a card that has nothing to do pins (or unpins) its explanation
+    const card = target.classList.contains('card') && target._card;
+    if (!card) return;
+    const pinned = pinnedCard();
+    if (pinned && pinned.id === card.id) hidePreview(true);
+    else showPreview(card, true);
   }
 
   onKey(ev) {
+    if (ev.key === 'Escape' && (this.playing || this.queue.length) && !document.querySelector('.modal-overlay')) {
+      ev.preventDefault();
+      this.skip();
+      return;
+    }
     if (!this.decision || document.querySelector('.modal-overlay')) return;
     if (ev.target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(ev.target.tagName)) return;
     if (ev.key === ' ' || ev.key === 'Enter') {
@@ -774,9 +1697,27 @@ export class GameView {
     setTimeout(() => document.addEventListener('mousedown', close), 0);
   }
 
+  /**
+   * The graveyard/exile window: every card in the zone, display-only except the ones the engine already lists
+   * a legal action for (glowing, clickable) or carries a hint for (dimmed, with its reason) — the same
+   * `extras`/`clickable` state the board itself uses, since these cards may also be the same ones shown beside
+   * the hand (design-zone-play.md, criterion 3).
+   */
   showZone(title, cards) {
+    // a fresh cache, not `this.cache`: that one is keyed by card id and shared with the live board (the off-hand
+    // row, the hand, ...), so reusing it here would hand the modal the same DOM node currently sitting in the
+    // row beside the hand and pull it out of the board when the modal opens (and leave it missing after close).
     const cache = new Map();
-    modal(title, h('div', { class: 'zone-view' }, cards.length ? cards.map((c) => renderCard(cache, c)) : h('p', { class: 'muted' }, 'Empty')), [], { wide: true });
+    const body = h('div', { class: 'zone-view' },
+      cards.length ? cards.map((c) => {
+        const x = this.extras.get(c.id) || {};
+        const el = renderCard(cache, c, x);
+        el.classList.remove('attached', 'foreign');
+        if (this.clickable.has(c.id)) el.classList.add('clickable');
+        return el;
+      }) : h('p', { class: 'muted' }, 'Empty'));
+    body.addEventListener('click', (ev) => this.onBoardClick(ev));
+    modal(title, body, [], { wide: true });
   }
 
   // --- dialogs ------------------------------------------------------------------------------------

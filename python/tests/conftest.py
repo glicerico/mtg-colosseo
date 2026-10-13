@@ -8,7 +8,8 @@ from colosseo import Decision
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SERVER = os.environ.get("COLOSSEO_SERVER", "http://localhost:7070")
-DIALOG_DECK = str(Path(__file__).parent / "decks" / "dialog-test.dck")
+DECKS = Path(__file__).parent / "decks"
+DIALOG_DECK = str(DECKS / "dialog-test.dck")
 
 
 @pytest.fixture(scope="session")
