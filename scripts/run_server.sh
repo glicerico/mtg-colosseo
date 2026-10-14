@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Starts the Colosseo server (web UI + agent API) on http://localhost:${PORT:-7070}
+# Starts the Colosseum server (web UI + agent API) on http://localhost:${PORT:-7070}
 #   PORT=7070 JAVA_OPTS=-Xmx4g scripts/run_server.sh [extra engine args]
 # By default the server only listens on 127.0.0.1 and protects every game with per-game tokens (--auth open
 # disables that for debugging). To accept other machines, bind to all interfaces (see docs/architecture.md):
-#   HOST=0.0.0.0 COLOSSEO_API_KEY=... scripts/run_server.sh
+#   HOST=0.0.0.0 COLOSSEUM_API_KEY=... scripts/run_server.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-JAR="$ROOT/engine/target/colosseo-engine.jar"
+JAR="$ROOT/engine/target/colosseum-engine.jar"
 if [ ! -f "$JAR" ]; then
     "$ROOT/scripts/build.sh"
 fi
-DATA="${COLOSSEO_DATA:-$ROOT/data}"
+DATA="${COLOSSEUM_DATA:-$ROOT/data}"
 mkdir -p "$DATA"
 # XMage keeps its card database in ./db of the working directory (built on first start, ~1 minute)
 cd "$DATA"

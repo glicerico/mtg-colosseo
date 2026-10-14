@@ -1,8 +1,8 @@
 // Card rendering: Scryfall images when available, a readable text frame otherwise.
 import { h, manaSymbols, escapeRules } from './ui.js';
 
-const IMAGES_KEY = 'colosseo.images';
-const SCALE_KEY = 'colosseo.cardScale';
+const IMAGES_KEY = 'colosseum.images';
+const SCALE_KEY = 'colosseum.cardScale';
 export const CARD_SCALE = { min: 0.6, max: 1.6, step: 0.05 };
 const storedScale = parseFloat(localStorage.getItem(SCALE_KEY));
 export const settings = {
@@ -35,7 +35,7 @@ export function imageUrl(card, version = 'normal') {
 // as Scryfall names tokens, its variant). Each kind of token is looked up once on Scryfall, in that set's tokens
 // ("t" + set code) and then in any set, preferring the token with the same power/toughness, colours and keywords.
 // Lookups are queued (at most ~6 a second, as Scryfall asks) and remembered in this browser.
-const TOKENS_KEY = 'colosseo.tokenImages.v1';
+const TOKENS_KEY = 'colosseum.tokenImages.v1';
 const tokenImages = new Map(Object.entries((() => { try { return JSON.parse(localStorage.getItem(TOKENS_KEY)) || {}; } catch { return {}; } })()));
 const tokenQueue = [];
 const tokenQueued = new Set();

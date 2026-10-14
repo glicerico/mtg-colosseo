@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from colosseo import Decision
+from colosseum import Decision
 
 FIXTURES = Path(__file__).parent / "fixtures"
-SERVER = os.environ.get("COLOSSEO_SERVER", "http://localhost:7070")
+SERVER = os.environ.get("COLOSSEUM_SERVER", "http://localhost:7070")
 DECKS = Path(__file__).parent / "decks"
 DIALOG_DECK = str(DECKS / "dialog-test.dck")
 
@@ -23,16 +23,16 @@ def decisions(raw_decisions):
     return {k: Decision(json.loads(json.dumps(v))) for k, v in raw_decisions.items()}
 
 
-#: set COLOSSEO_REQUIRE_SERVER=1 (as CI does) to make integration tests fail instead of skipping
-REQUIRE_SERVER = os.environ.get("COLOSSEO_REQUIRE_SERVER") == "1"
+#: set COLOSSEUM_REQUIRE_SERVER=1 (as CI does) to make integration tests fail instead of skipping
+REQUIRE_SERVER = os.environ.get("COLOSSEUM_REQUIRE_SERVER") == "1"
 
 
 def server_up() -> bool:
     if REQUIRE_SERVER:
         return True
-    from colosseo import ColosseoClient
+    from colosseum import ColosseumClient
     try:
-        ColosseoClient(SERVER, timeout=3).health()
+        ColosseumClient(SERVER, timeout=3).health()
         return True
     except Exception:
         return False

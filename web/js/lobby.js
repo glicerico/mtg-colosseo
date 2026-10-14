@@ -3,7 +3,7 @@ import { getDecks, getSets, getGames, createGame, terminateGame, getHealth, getL
 import { h, toast, colorPips, manaSymbols } from './ui.js';
 import { settings, setImages, showPreview, hidePreview } from './cards.js';
 
-const PREFS_KEY = 'colosseo.lobby';
+const PREFS_KEY = 'colosseum.lobby';
 
 function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; }
@@ -47,7 +47,7 @@ export function renderLobby(app) {
   const gamesCard = h('section', { class: 'panel games-panel' }, h('h2', {}, 'Games'), h('div', { class: 'games-list' }, 'Loading…'));
   app.append(
     h('div', { class: 'hero' },
-      h('h1', {}, 'MTG Colosseo'),
+      h('h1', {}, 'MTG Colosseum'),
       h('p', {}, 'Magic: The Gathering for humans and agents, powered by the XMage rules engine. ',
         'Play limited decks against XMage’s AI or your own agents, or watch agents battle it out.')),
     h('div', { class: 'lobby-grid' }, playCard, watchCard, gamesCard));
@@ -251,7 +251,7 @@ export function renderLeaderboard(app) {
   app.append(h('h1', {}, 'Leaderboard'),
     h('p', { class: 'muted' }, 'Elo over the server’s rated games, by agent identity (name@version). Only games the rules engine ',
       'finished are scored; stopped, abandoned or void games are counted as unfinished and never move ratings. ',
-      'Rated games come from ', h('code', {}, 'run_match(..., rated=True)'), ' or ', h('code', {}, 'colosseo match --rated'), '.'),
+      'Rated games come from ', h('code', {}, 'run_match(..., rated=True)'), ' or ', h('code', {}, 'colosseum match --rated'), '.'),
     body);
   getLeaderboard().then((board) => {
     const rows = board.ratings || [];
@@ -278,13 +278,13 @@ export function renderAgents(app) {
   const code = (text) => h('pre', {}, h('code', {}, text));
   app.append(
     h('h1', {}, 'Connecting agents'),
-    h('p', {}, 'Agents talk to the Colosseo over a small JSON protocol on a WebSocket. Every choice the rules engine needs ',
+    h('p', {}, 'Agents talk to the Colosseum over a small JSON protocol on a WebSocket. Every choice the rules engine needs ',
       '(priority, targets, attackers, blockers, modes, amounts, …) arrives as a ', h('code', {}, 'decision'),
       ' message with its legal options; the agent answers with an ', h('code', {}, 'action'), '. The Python SDK wraps all of it.'),
     h('h2', {}, 'Python in 10 lines'),
     code(`pip install -e python/          # from the repository root
 
-from colosseo import Agent, run_match
+from colosseum import Agent, run_match
 
 class MyAgent(Agent):
     name = "my-agent"
@@ -297,14 +297,14 @@ class MyAgent(Agent):
 
 print(run_match(MyAgent, "xmage:2", games=10, server="${origin}"))`),
     h('h2', {}, 'Command line'),
-    code(`python -m colosseo --server ${origin} decks
-python -m colosseo --server ${origin} play --agent heuristic --opponent xmage:2
-python -m colosseo --server ${origin} tournament random heuristic xmage:1 --games 6`),
+    code(`python -m colosseum --server ${origin} decks
+python -m colosseum --server ${origin} play --agent heuristic --opponent xmage:2
+python -m colosseum --server ${origin} tournament random heuristic xmage:1 --games 6`),
     h('h2', {}, 'Play against your agent'),
     h('p', {}, 'In the lobby choose "External agent" as opponent. The game waits for your agent to connect to seat 1 ',
       '(the game page shows the exact command, including the seat token protected servers require):'),
-    code(`from colosseo import play
-from colosseo.agents import HeuristicAgent
+    code(`from colosseum import play
+from colosseum.agents import HeuristicAgent
 play(HeuristicAgent(), game_id="<id shown in the game>", seat=1, server="${origin}", token="<seat token>")`),
     h('h2', {}, 'Access control'),
     h('p', {}, 'Creating a game returns a token per agent/human seat and an owner token. The seat token is required to ',
@@ -313,7 +313,7 @@ play(HeuristicAgent(), game_id="<id shown in the game>", seat=1, server="${origi
       'Opponents and ordinary spectators never see cards picked from hidden zones nor agents’ comments.'),
     h('p', {}, 'To isolate an agent, run it as its own process (ideally in its own container) that only reaches the ',
       'server’s WebSocket with its seat token:'),
-    code(`python -m colosseo --server ${origin} agent <game_id> --seat 1 --token <seat token> --agent my_pkg.agents:MyAgent`),
+    code(`python -m colosseum --server ${origin} agent <game_id> --seat 1 --token <seat token> --agent my_pkg.agents:MyAgent`),
     h('h2', {}, 'Raw protocol'),
     code(`POST ${origin}/api/games
 {"seats": [{"type": "agent", "deck": "fdn:azorius-skies"},

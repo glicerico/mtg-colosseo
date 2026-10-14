@@ -4,11 +4,11 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>colosseo</groupId>
-    <artifactId>colosseo-engine</artifactId>
+    <groupId>colosseum</groupId>
+    <artifactId>colosseum-engine</artifactId>
     <version>0.1.0</version>
     <packaging>jar</packaging>
-    <name>MTG Colosseo engine</name>
+    <name>MTG Colosseum engine</name>
     <description>Headless XMage game host exposing a JSON/WebSocket protocol for humans and agents</description>
 
     <properties>
@@ -73,7 +73,7 @@
     </dependencies>
 
     <build>
-        <finalName>colosseo-engine</finalName>
+        <finalName>colosseum-engine</finalName>
         <resources>
             <resource>
                 <directory>src/main/resources</directory>
@@ -116,7 +116,7 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <mainClass>colosseo.engine.ColosseoServer</mainClass>
+                            <mainClass>colosseum.engine.ColosseumServer</mainClass>
                             <addClasspath>true</addClasspath>
                             <classpathPrefix>lib/</classpathPrefix>
                         </manifest>

@@ -4,9 +4,9 @@ import threading
 
 import pytest
 
-import colosseo.runner as runner
-from colosseo import Agent, ColosseoError, elo_ratings, match_schedule, outcome, play, run_match
-from colosseo.runner import MatchResult
+import colosseum.runner as runner
+from colosseum import Agent, ColosseumError, elo_ratings, match_schedule, outcome, play, run_match
+from colosseum.runner import MatchResult
 
 
 # --- fakes -------------------------------------------------------------------------------------
@@ -52,11 +52,11 @@ class FakeClient:
     def connect_seat(self, game_id, seat, token=None):
         self.connects += 1
         if self.connects > 30:
-            raise ColosseoError("test guard: too many connections")  # so a regression fails instead of hanging
+            raise ColosseumError("test guard: too many connections")  # so a regression fails instead of hanging
         if not self.connections and self.connection_factory:
             return self.connection_factory()
         if not self.connections:
-            raise ColosseoError("connection refused")
+            raise ColosseumError("connection refused")
         return self.connections.pop(0)
 
     def game(self, game_id):
@@ -181,7 +181,7 @@ class FakeClock:
 
 @pytest.fixture
 def clock(monkeypatch):
-    import colosseo.agent as agent_module
+    import colosseum.agent as agent_module
     c = FakeClock()
     monkeypatch.setattr(agent_module, "time", c)
     return c

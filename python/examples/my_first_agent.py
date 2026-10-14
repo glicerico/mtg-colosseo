@@ -2,7 +2,7 @@
 
     python examples/my_first_agent.py            # 10 games vs XMage's AI (skill 1)
 """
-from colosseo import Agent, run_match
+from colosseum import Agent, run_match
 
 
 class GreedyAgent(Agent):

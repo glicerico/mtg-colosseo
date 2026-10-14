@@ -1,9 +1,9 @@
-# MTG Colosseo
+# MTG Colosseum
 
 A research platform where **agents and humans play Magic: The Gathering** against each other.
 
 - **Real rules**: games run on [XMage](https://github.com/magefree/mage)'s rules engine (tens of thousands of
-  implemented cards, full stack/priority/combat/replacement-effect handling). Colosseo embeds it headlessly.
+  implemented cards, full stack/priority/combat/replacement-effect handling). Colosseum embeds it headlessly.
 - **One protocol for everyone**: every choice the engine needs - priority, targets, attackers, blockers, modes,
   X values, damage assignment, mulligans, ... - becomes a JSON *decision* with its legal options. Humans answer
   through the web UI, agents through a WebSocket (a Python SDK is included).
@@ -20,7 +20,7 @@ A research platform where **agents and humans play Magic: The Gathering** agains
   decks (FDN and Bloomburrow). Any XMage set works - adding a deck is dropping an XMage `.dck` file in `decks/`.
 
 ```
-            ┌──────────────── Colosseo server (Java, engine/) ─────────────────┐
+            ┌──────────────── Colosseum server (Java, engine/) ─────────────────┐
  browser ──►│ static web UI  ─┐                                                 │
  (human)    │                 │   REST  /api/...          XMage rules engine     │
             │ WebSocket /ws/game/{id}?seat=N ─► GameSession ─► BridgePlayer ──┐  │
@@ -43,17 +43,17 @@ Open http://localhost:7070, pick a deck and play against XMage's AI, or start an
 The server listens on `127.0.0.1`, and every game is protected by the per-game tokens returned when it is
 created (the lobby and the Python runners keep them; invitation links carry them): a seat needs its token, and
 showing both hands or stopping a game needs the owner token. `--auth open` turns that off for local debugging.
-To let other machines connect, bind to all interfaces; `COLOSSEO_API_KEY` restricts who may create games:
+To let other machines connect, bind to all interfaces; `COLOSSEUM_API_KEY` restricts who may create games:
 
 ```bash
-HOST=0.0.0.0 COLOSSEO_API_KEY=change-me scripts/run_server.sh
+HOST=0.0.0.0 COLOSSEUM_API_KEY=change-me scripts/run_server.sh
 ```
 
 Or with Docker:
 
 ```bash
-docker build -t mtg-colosseo .
-docker run -p 127.0.0.1:7070:7070 -e COLOSSEO_API_KEY=change-me -v colosseo-data:/app/data mtg-colosseo
+docker build -t mtg-colosseum .
+docker run -p 127.0.0.1:7070:7070 -e COLOSSEUM_API_KEY=change-me -v colosseum-data:/app/data mtg-colosseum
 ```
 
 See [docs/architecture.md](docs/architecture.md#deployment-and-access-control) for the access-control model.
@@ -65,7 +65,7 @@ pip install -e python/            # add ".[llm]" for the Claude agent
 ```
 
 ```python
-from colosseo import Agent, run_match
+from colosseum import Agent, run_match
 
 class MyAgent(Agent):
     name = "my-agent"
@@ -91,24 +91,24 @@ and new game-log lines. Answers are built with `d.choose(...)`, `d.choose_many(.
 `d.block(...)`, `d.amount(...)`, `d.amounts(...)` or `d.default()`. Illegal answers are rejected and the
 agent is asked again.
 
-Included agents (`colosseo.agents`): `RandomAgent`, `HeuristicAgent` (a readable rule-based baseline) and
+Included agents (`colosseum.agents`): `RandomAgent`, `HeuristicAgent` (a readable rule-based baseline) and
 `ClaudeAgent` (asks Claude for each decision via structured outputs; needs `ANTHROPIC_API_KEY` or an
 `ant auth login` profile). Built-in opponents: `"xmage"` / `"xmage:N"` (XMage's MAD simulation AI, skill 1-10)
 and `"human"` (a seat played in the browser).
 
 ```bash
-python -m colosseo decks
-python -m colosseo play --agent heuristic --opponent xmage:2 --pace-ms 500   # prints a URL to watch it
-python -m colosseo match heuristic random --games 20 --parallel 4
-python -m colosseo tournament random heuristic xmage:1 --games 10            # round robin + Elo
-python -m colosseo play --agent human --opponent my_pkg.agents:MyAgent       # play against your agent
+python -m colosseum decks
+python -m colosseum play --agent heuristic --opponent xmage:2 --pace-ms 500   # prints a URL to watch it
+python -m colosseum match heuristic random --games 20 --parallel 4
+python -m colosseum tournament random heuristic xmage:1 --games 10            # round robin + Elo
+python -m colosseum play --agent human --opponent my_pkg.agents:MyAgent       # play against your agent
 ```
 
 Reinforcement-learning style loop:
 
 ```python
-from colosseo import ColosseoEnv
-env = ColosseoEnv(deck="fdn:azorius-skies", opponent="xmage:1", opponent_deck="fdn:rakdos-raiders")
+from colosseum import ColosseumEnv
+env = ColosseumEnv(deck="fdn:azorius-skies", opponent="xmage:1", opponent_deck="fdn:rakdos-raiders")
 decision = env.reset()
 while decision is not None:
     decision, reward, done, info = env.step(my_policy(decision))
@@ -125,9 +125,9 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
 
 | path | contents |
 |------|----------|
-| `engine/` | Java server embedding XMage: `BridgePlayer` (decisions), `QueryTranslator`, `StateView` (observations), `GameSession`, REST/WebSocket (`ColosseoServer`) |
+| `engine/` | Java server embedding XMage: `BridgePlayer` (decisions), `QueryTranslator`, `StateView` (observations), `GameSession`, REST/WebSocket (`ColosseumServer`) |
 | `web/` | browser client (plain ES modules, no build step) |
-| `python/` | `colosseo` SDK, reference agents, CLI, tests |
+| `python/` | `colosseum` SDK, reference agents, CLI, tests |
 | `decks/` | preconstructed decks (XMage `.dck` format) |
 | `scripts/` | build XMage, build engine, run server |
 | `data/` | runtime: card database and `games/*.jsonl` records (git-ignored) |
@@ -144,12 +144,12 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
   `time_bank_s` is a chess clock (running out forfeits the game). `max_decisions`, `max_record_mb` and
   `deadline_s` void runaway games, `abandon_timeout_s` stops games whose agent disconnected, and
   `turn_limit_result` decides whether hitting `max_turns` is a draw or void.
-- **Scoring**: only games the engine finished count (`colosseo.outcome`); interrupted, stopped, void or
+- **Scoring**: only games the engine finished count (`colosseum.outcome`); interrupted, stopped, void or
   crashed games are reported as errors, never as draws, and don't change Elo. Default moves substituted for an
   agent's own (exceptions, rejected answers, timeouts) are marked as fallbacks and counted per seat; matches are
   strict by default, so an agent exception forfeits the game.
 - **Ratings**: agents are identified as `name@version` (plus a content hash in the records); games created with
-  `rated` feed the server's leaderboard (`/api/leaderboard`, the Leaderboard page, `colosseo leaderboard`).
+  `rated` feed the server's leaderboard (`/api/leaderboard`, the Leaderboard page, `colosseum leaderboard`).
 - **Determinism**: a game's seed reproduces it: XMage is patched (`scripts/xmage-patches`) so each game has its
   own random generator, and options are listed in a canonical order. Same seed + same deterministic agents =
   same game, even with other games running. Matches follow a schedule computed from their seed (deck pairings,
@@ -165,7 +165,7 @@ other languages), [docs/architecture.md](docs/architecture.md) (engine internals
   Skip or Esc shows the board as it is now. The data behind it (`explain`, `token_image`, `event` messages) is
   sent to browser views only; agents never get it (docs/protocol.md).
 - **Records**: `data/games/<id>.jsonl` pins the engine, XMage, deck and agent versions. A record holds both
-  players' observations; `GET /api/games/{id}/record?seat=N` (or `colosseo record ID --seat N`) gives the view
+  players' observations; `GET /api/games/{id}/record?seat=N` (or `colosseum record ID --seat N`) gives the view
   of one seat, suitable for handing to that agent.
 - **Resources**: MAD AI games are CPU and memory hungry - give the JVM ~1 GB per concurrently running AI
   game (`JAVA_OPTS=-Xmx8g scripts/run_server.sh`).

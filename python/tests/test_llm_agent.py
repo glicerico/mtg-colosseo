@@ -2,7 +2,7 @@
 import json
 from types import SimpleNamespace
 
-from colosseo.agents.llm import ClaudeAgent
+from colosseum.agents.llm import ClaudeAgent
 
 
 class FakeMessages:

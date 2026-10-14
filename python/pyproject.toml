@@ -3,9 +3,9 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "colosseo"
+name = "colosseum"
 version = "0.1.0"
-description = "Python SDK for MTG Colosseo: write agents that play Magic: The Gathering against XMage's AI, other agents and humans"
+description = "Python SDK for MTG Colosseum: write agents that play Magic: The Gathering against XMage's AI, other agents and humans"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.9"
@@ -17,15 +17,15 @@ dev = ["pytest", "pytest-timeout"]
 ui = ["pytest", "playwright"]
 
 [project.scripts]
-colosseo = "colosseo.cli:main"
+colosseum = "colosseum.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["colosseo*"]
+include = ["colosseum*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: needs a running Colosseo server (COLOSSEO_SERVER, default http://localhost:7070)",
+    "integration: needs a running Colosseum server (COLOSSEUM_SERVER, default http://localhost:7070)",
     "ui: browser tests of web/ (needs playwright and its chromium; skipped without them)",
 ]
 # with pytest-timeout installed (the dev extra): a hung test fails after 5 minutes instead of stalling CI

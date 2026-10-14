@@ -2,13 +2,13 @@
 
 ```bash
 pip install -e python/          # or: pip install -e "python/[llm]" for ClaudeAgent
-scripts/run_server.sh           # in another terminal (or colosseo.server.launch() from Python)
+scripts/run_server.sh           # in another terminal (or colosseum.server.launch() from Python)
 ```
 
 ## The interface
 
 ```python
-from colosseo import Agent, Decision, Action
+from colosseum import Agent, Decision, Action
 
 class MyAgent(Agent):
     name = "my-agent"                    # shown in the UI and game records
@@ -52,8 +52,8 @@ you have a legal non-mana action. Mana is paid automatically.
 ## Running games
 
 ```python
-from colosseo import run_game, run_match, round_robin
-from colosseo.agents import RandomAgent, HeuristicAgent
+from colosseum import run_game, run_match, round_robin
+from colosseum.agents import RandomAgent, HeuristicAgent
 
 run_game(MyAgent(), "xmage:2", "fdn:azorius-skies", "fdn:gruul-stompers", pace_ms=400)  # watch it in the lobby
 m = run_match(MyAgent, HeuristicAgent, games=50, parallel=4, seed=7)  # random deck pairings, balanced starts
@@ -66,7 +66,7 @@ agents; don't use the same instance for both seats of one game).
 
 ### Scoring and failures
 
-Only games the rules engine finished are scored. `colosseo.outcome(result)` returns `"win"`, `"draw"` or
+Only games the rules engine finished are scored. `colosseum.outcome(result)` returns `"win"`, `"draw"` or
 `"unfinished"`; a draw needs an explicit `draw: true` from a finished game (turn limit, both players losing).
 If an agent's connection drops (while waiting or while sending an answer), `play()` reconnects for up to
 `reconnect_timeout` seconds (60 by default; a later outage gets a fresh window only if the game visibly
@@ -82,7 +82,7 @@ stopped with `status: "abandoned"`; `deadline_s` bounds a game's wall-clock time
 
 ### Schedules and reproducibility
 
-`run_match` plans every game before playing (`colosseo.match_schedule`): deck pairings, seats, who starts and
+`run_match` plans every game before playing (`colosseum.match_schedule`): deck pairings, seats, who starts and
 an engine seed per game, all derived from `seed` (generated and stored in `MatchResult.seed` when you don't
 pass one). The plan is identical for any `parallel` value and is stored in `MatchResult.schedule`; each game
 result carries its `index`, `seed`, `starting_seat`, `a_seat`, `deck_a` and `deck_b`. Games come in pairs
@@ -103,7 +103,7 @@ each record also stores a hash of the agent's source file (`agent_hash`), so res
 never mix. `run_match` is strict by default (`on_error="forfeit"`): an exception in `decide` concedes that
 game. Defaults the SDK or the engine substitute for an agent's own answer are marked as fallbacks
 (`"agent_error"`, `"rejected"`, `"timeout"`, `"illegal_repeat"`), counted per seat in each result
-(`players[i]["fallbacks"]`) and in `MatchResult.fallbacks_a/_b`. Pass `rated=True` (or `colosseo match --rated`)
+(`players[i]["fallbacks"]`) and in `MatchResult.fallbacks_a/_b`. Pass `rated=True` (or `colosseum match --rated`)
 to put the games on the server's leaderboard.
 
 Per-game limits (game options): `max_decisions` (default 10000) and `max_record_mb` (100) stop runaway
@@ -119,24 +119,24 @@ object in the observation carries its engine-derived `keywords` (`"flying"`, `"m
 Repeating the same illegal declaration three times makes the engine declare no blocks (a fallback).
 
 Playing against your agent yourself: create a game with a `human` seat and an `agent` seat
-(`python -m colosseo play --agent human --opponent my_module:MyAgent` prints the invitation URL), or pick
-"External agent" in the lobby and connect with `colosseo.play(MyAgent(), game_id, seat=1, token=...)` (the
+(`python -m colosseum play --agent human --opponent my_module:MyAgent` prints the invitation URL), or pick
+"External agent" in the lobby and connect with `colosseum.play(MyAgent(), game_id, seat=1, token=...)` (the
 game page shows the command with the seat token), or from a shell / container:
-`python -m colosseo agent <game_id> --seat 1 --token <seat token> --agent my_module:MyAgent`.
+`python -m colosseum agent <game_id> --seat 1 --token <seat token> --agent my_module:MyAgent`.
 
 ### Servers that require tokens
 
 `run_game`/`run_match` handle tokens for you (they create the games). When you connect to a game someone
 else created, you need that seat's token: `play(agent, game_id, seat, server, token="…")`. Watching with both
 hands visible needs the game's owner token: `client.spectate(game_id, reveal=True, token=owner_token)`. If the
-server was started with `--api-key`, pass `ColosseoClient(server, api_key="…")` / `client=` to the runners, or
-set `COLOSSEO_API_KEY`.
+server was started with `--api-key`, pass `ColosseumClient(server, api_key="…")` / `client=` to the runners, or
+set `COLOSSEUM_API_KEY`.
 
 ## Environment API
 
 ```python
-from colosseo import ColosseoEnv
-env = ColosseoEnv(deck="fdn:dimir-tricksters", opponent="xmage:1", opponent_deck="sealed:FDN", max_turns=40)
+from colosseum import ColosseumEnv
+env = ColosseumEnv(deck="fdn:dimir-tricksters", opponent="xmage:1", opponent_deck="sealed:FDN", max_turns=40)
 d = env.reset()
 while d is not None:
     d, reward, done, info = env.step(policy(d))   # reward +1/-1 at the end, 0 for draws and unfinished games
@@ -154,7 +154,7 @@ lines (plus `fallback` lines), then `result`; every action line precedes the dec
 trace for both seats - convenient for behaviour cloning from XMage's AI or from human play.
 
 A full record contains both players' hidden information. To give an agent its own games, export one seat's
-view: `client.record(game_id, seat=0, token=seat_token)` or `python -m colosseo record <game_id> --seat 0 --token
+view: `client.record(game_id, seat=0, token=seat_token)` or `python -m colosseum record <game_id> --seat 0 --token
 ...` - its decisions and actions, the opponent's actions as public notices, the opponent's deck only as a hash.
 
 ## Other languages

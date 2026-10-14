@@ -2,9 +2,9 @@
 import collections
 import random
 
-from colosseo import ColosseoEnv
+from colosseum import ColosseumEnv
 
-env = ColosseoEnv(deck="fdn:selesnya-pack", opponent="xmage:1", opponent_deck="fdn:rakdos-raiders", max_turns=40)
+env = ColosseumEnv(deck="fdn:selesnya-pack", opponent="xmage:1", opponent_deck="fdn:rakdos-raiders", max_turns=40)
 kinds = collections.Counter()
 for episode in range(3):
     d, total = env.reset(), 0.0

@@ -27,7 +27,7 @@ commit) and hosts games. No XMage server/client code is used: games are created 
 - `Connection` queues outgoing messages per client and writes them from a sender thread, so a slow or dead
   client never blocks a game thread (clients that fall thousands of messages behind are disconnected).
 - `AccessPolicy` decides who may control seats, reveal hands, stop and create games (see below).
-- `ColosseoServer` (Javalin) serves the REST API, the WebSocket and the static web UI.
+- `ColosseumServer` (Javalin) serves the REST API, the WebSocket and the static web UI.
 
 XMage's MAD AI (`ComputerPlayer7`) plays `xmage` seats inside the engine.
 
@@ -36,7 +36,7 @@ the pending decision; card images come from Scryfall (`/cards/{set}/{number}?for
 frame fallback when offline.
 
 **Python SDK (`python/`).** Protocol wrappers, the agent loop (`play`), runners (`run_game`, `run_match`,
-`round_robin` + Elo), `ColosseoEnv`, a CLI and reference agents.
+`round_robin` + Elo), `ColosseumEnv`, a CLI and reference agents.
 
 ## Deployment and access control
 
@@ -48,7 +48,7 @@ open server bound to loopback still only answers to loopback host names, and eve
 same-origin requests, so web pages you visit can't drive it.
 
 `scripts/run_server.sh` binds to `127.0.0.1`; bind to another address (`HOST=0.0.0.0`, the Docker image) to
-accept other machines. Add `--api-key` (`COLOSSEO_API_KEY`) to restrict who can create games, `--max-games` to
+accept other machines. Add `--api-key` (`COLOSSEUM_API_KEY`) to restrict who can create games, `--max-games` to
 cap concurrent games (default 32) and `--cors-origin` for pages served elsewhere. Deck file paths are only
 accepted on a loopback server (`--deck-paths on|off`). Tokens travel in URLs (WebSocket query strings,
 invitation links), so put a TLS-terminating proxy in front of a server on an untrusted network.
@@ -60,7 +60,7 @@ other: `run_game`/`run_match` run agents as threads of one Python process, and t
 records contain both players' hidden information. To evaluate untrusted agents, run each one as its own
 process in its own sandbox (a container with a read-only filesystem, no access to the server's data
 directory, CPU/memory/time limits and network access only to the server's port) and connect it with
-`python -m colosseo agent <game_id> --seat N --token <seat token> --agent module:Class`; create the games
+`python -m colosseum agent <game_id> --seat N --token <seat token> --agent module:Class`; create the games
 (with `rated` / `time_bank_s` / limits as needed) from a separate coordinator that keeps the owner token.
 Hosted and remote agents then use exactly the same seat protocol. Give agents their own past games through
 per-seat record exports, never the raw records.
@@ -86,7 +86,7 @@ XMage implements almost every Magic set, so "adding a set" is only about decks:
    comments `# description: …` and `# tags: …` are shown in the lobby. Plain `4 Card Name` text decks also
    load via a file path. Use `GET /api/sets/{code}/cards` to browse a set's cards and collector numbers.
 2. **Sealed**: `sealed:CODE` works for any set with boosters; add the code to `FEATURED_SETS` in
-   `ColosseoServer` to list it in the lobby.
+   `ColosseumServer` to list it in the lobby.
 3. **Constructed/other formats**: decks of any size load (the minimum is 40 cards); the turn limit and
    starting life are game options.
 

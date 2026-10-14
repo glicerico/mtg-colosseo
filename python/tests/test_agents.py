@@ -1,6 +1,6 @@
 import pytest
 
-from colosseo.agents import HeuristicAgent, RandomAgent
+from colosseum.agents import HeuristicAgent, RandomAgent
 
 
 def check_legal(d, action):

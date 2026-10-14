@@ -1,4 +1,4 @@
-// REST + WebSocket helpers for the Colosseo server (same origin), and the game secrets this browser holds.
+// REST + WebSocket helpers for the Colosseum server (same origin), and the game secrets this browser holds.
 
 export async function api(path, options = {}) {
   const { token, ...rest } = options;
@@ -29,8 +29,8 @@ export function wsUrl(path) {
 // Creating a game returns its seat tokens and owner token. They are kept in localStorage so that a
 // refresh or a later "Rejoin" keeps working; invite links carry a seat token in the URL fragment.
 
-const SECRETS_PREFIX = 'colosseo.game.';
-const API_KEY = 'colosseo.apikey';
+const SECRETS_PREFIX = 'colosseum.game.';
+const API_KEY = 'colosseum.apikey';
 const MAX_GAMES_KEPT = 100;
 
 function readJson(key) {

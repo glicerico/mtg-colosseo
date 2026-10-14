@@ -8,20 +8,20 @@ import time
 
 import pytest
 
-from colosseo import ColosseoClient, ColosseoError, outcome
-from colosseo.client import SeatConnection
+from colosseum import ColosseumClient, ColosseumError, outcome
+from colosseum.client import SeatConnection
 
 from .conftest import SERVER, server_up
 
 pytestmark = [pytest.mark.integration,
-              pytest.mark.skipif(not server_up(), reason=f"no Colosseo server at {SERVER}")]
+              pytest.mark.skipif(not server_up(), reason=f"no Colosseum server at {SERVER}")]
 
 AGENTS = [{"type": "agent", "deck": "fdn:azorius-skies"}, {"type": "agent", "deck": "fdn:rakdos-raiders"}]
 
 
 @pytest.fixture
 def client():
-    return ColosseoClient(SERVER)
+    return ColosseumClient(SERVER)
 
 
 def collect(conn: SeatConnection, sink: list, answer=None, stop: threading.Event = None):
@@ -111,7 +111,7 @@ def test_protected_game_requires_tokens(client):
         spec.close()
 
         # stopping the game needs the owner token
-        with pytest.raises(ColosseoError) as e:
+        with pytest.raises(ColosseumError) as e:
             client.terminate(gid)
         assert e.value.status == 403
         client.terminate(gid, owner)
@@ -121,7 +121,7 @@ def test_protected_game_requires_tokens(client):
     finally:
         try:
             client.terminate(gid, owner)
-        except ColosseoError:
+        except ColosseumError:
             pass
 
 

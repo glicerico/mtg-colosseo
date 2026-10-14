@@ -1,3 +1,3 @@
-# colosseo (Python SDK)
+# colosseum (Python SDK)
 
 See the repository README and docs/agents.md.
