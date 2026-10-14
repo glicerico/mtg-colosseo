@@ -7,7 +7,7 @@ index 846a834e50..a4824b1f88 100644
                  .stream()
                  .filter(card -> !card.isExtraDeckCard())
 -                .collect(Collectors.toSet());
-+                .collect(Collectors.toCollection(LinkedHashSet::new)); // MTG Colosseo patch: deck order, not hash order
++                .collect(Collectors.toCollection(LinkedHashSet::new)); // MTG Colosseum patch: deck order, not hash order
      }
  
      public Card findCard(UUID cardId) {
@@ -41,7 +41,7 @@ index b042486345..0434400909 100644
  
      private static final Random random = new Random(); // thread safe with seed support
  
-+    // MTG Colosseo patch: setSeed() gives the calling thread (a game's thread) its own generator, so a game's
++    // MTG Colosseum patch: setSeed() gives the calling thread (a game's thread) its own generator, so a game's
 +    // seed decides its shuffles no matter what other games or AI threads draw; unseeded threads share `random`
 +    private static final ThreadLocal<Random> seeded = new ThreadLocal<>();
 +

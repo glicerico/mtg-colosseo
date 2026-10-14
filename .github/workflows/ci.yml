@@ -86,7 +86,7 @@ jobs:
           echo "server did not start"; cat server.log; exit 1
       - name: Integration tests
         env:
-          COLOSSEO_REQUIRE_SERVER: "1"
+          COLOSSEUM_REQUIRE_SERVER: "1"
         run: |
           pip install -e "python/[dev]"
           python -m pytest python/tests -m integration -v

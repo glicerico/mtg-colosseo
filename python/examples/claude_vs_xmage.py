@@ -5,8 +5,8 @@
 """
 import logging
 
-from colosseo import run_game
-from colosseo.agents import ClaudeAgent
+from colosseum import run_game
+from colosseum.agents import ClaudeAgent
 
 logging.basicConfig(level=logging.INFO)
 agent = ClaudeAgent(effort="medium")   # every decision is one API call

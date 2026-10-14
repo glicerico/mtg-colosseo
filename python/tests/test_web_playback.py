@@ -27,7 +27,7 @@ pytestmark = pytest.mark.ui
 WEB = Path(__file__).resolve().parents[2] / "web"
 FIXTURES = Path(__file__).parent / "fixtures"
 TURN = json.loads(gzip.decompress((FIXTURES / "ui_turn.json.gz").read_bytes()))
-BASE = "http://colosseo.test"
+BASE = "http://colosseum.test"
 
 # what the page shows at a moment: the step's caption and log links, what it draws, the log lines it marks, the prompt
 SNAPSHOT = """() => {
@@ -80,7 +80,7 @@ def new_page(browser, hello, size=(1600, 900)):
 
 def go(page, gid, pace, seat=0):
     page.goto(BASE + "/")
-    page.evaluate("p => { localStorage.setItem('colosseo.images', 'off'); localStorage.setItem('colosseo.pace', p); }", pace)
+    page.evaluate("p => { localStorage.setItem('colosseum.images', 'off'); localStorage.setItem('colosseum.pace', p); }", pace)
     page.goto(f"{BASE}/#/game/{gid}/seat/{seat}" if seat >= 0 else f"{BASE}/#/watch/{gid}")
     page.reload()
 

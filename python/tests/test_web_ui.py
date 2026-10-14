@@ -21,7 +21,7 @@ pytestmark = pytest.mark.ui
 
 WEB = Path(__file__).resolve().parents[2] / "web"
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "ui_board.json").read_text())
-BASE = "http://colosseo.test"
+BASE = "http://colosseum.test"
 
 
 @pytest.fixture(scope="module")
@@ -73,8 +73,8 @@ def open_board(browser, decision, size=(1920, 1080), card_scale=None, mutate=Non
         page.route(pattern, handler)
     page.route_web_socket("**/ws/game/**", ws)
     page.goto(BASE + "/")
-    page.evaluate("([s, img]) => { localStorage.setItem('colosseo.images', img ? 'on' : 'off');"
-                  " if (s) localStorage.setItem('colosseo.cardScale', s); else localStorage.removeItem('colosseo.cardScale'); }",
+    page.evaluate("([s, img]) => { localStorage.setItem('colosseum.images', img ? 'on' : 'off');"
+                  " if (s) localStorage.setItem('colosseum.cardScale', s); else localStorage.removeItem('colosseum.cardScale'); }",
                   [str(card_scale) if card_scale else None, images])
     page.goto(f"{BASE}/#/game/{gid}/seat/0")
     page.reload()  # a hash change keeps the document: reload so the settings above are read
@@ -274,7 +274,7 @@ def test_card_size_control(browser):
     set_slider(page, 1.2)
     assert card_width(page) == pytest.approx(base * 1.2, abs=3)
     assert page.locator(".card-size-value").inner_text() == "120%"
-    assert page.evaluate("() => localStorage.getItem('colosseo.cardScale')") == "1.2"
+    assert page.evaluate("() => localStorage.getItem('colosseum.cardScale')") == "1.2"
     set_slider(page, 0.6)
     assert card_width(page) == pytest.approx(base * 0.6, abs=3)
     # the setting survives a reload

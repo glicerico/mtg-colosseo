@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from colosseo import ColosseoClient, ColosseoError, outcome, play, run_game
-from colosseo.agents import HeuristicAgent, RandomAgent
+from colosseum import ColosseumClient, ColosseumError, outcome, play, run_game
+from colosseum.agents import HeuristicAgent, RandomAgent
 
 from .conftest import SERVER, server_up
 
 pytestmark = [pytest.mark.integration,
-              pytest.mark.skipif(not server_up(), reason=f"no Colosseo server at {SERVER}")]
+              pytest.mark.skipif(not server_up(), reason=f"no Colosseum server at {SERVER}")]
 
 MENACE_DECK = str(Path(__file__).parent / "decks" / "menace-test.dck")
 FDN = ("fdn:azorius-skies", "fdn:rakdos-raiders")
@@ -21,7 +21,7 @@ FDN = ("fdn:azorius-skies", "fdn:rakdos-raiders")
 
 @pytest.fixture
 def client():
-    return ColosseoClient(SERVER)
+    return ColosseumClient(SERVER)
 
 
 class AllOutAttacker(HeuristicAgent):
@@ -165,7 +165,7 @@ def test_per_seat_record_and_version_pins(client):
     theirs = [l for l in mine if l["type"] == "action" and l["data"]["seat"] == 1]
     assert theirs and all(set(l["data"]) == {"seat", "decision_id", "kind", "summary"} for l in theirs)
     assert mine[-1]["type"] == "result"
-    with pytest.raises(ColosseoError) as e:
+    with pytest.raises(ColosseumError) as e:
         client.record(gid, token=seat0)  # the full record needs the owner token
     assert e.value.status == 403
     full = client.record(gid, token=box["owner_token"])

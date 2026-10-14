@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetches XMage (the rules engine) and installs the modules the Colosseo engine needs into ~/.m2.
+# Fetches XMage (the rules engine) and installs the modules the Colosseum engine needs into ~/.m2.
 #
 #   XMAGE_REF   git commit/tag of magefree/mage to build (default: the tested revision below)
 #   XMAGE_DIR   where to clone XMage (default: .xmage in the repository root)
@@ -26,7 +26,7 @@ if ! git cat-file -e "$XMAGE_REF^{commit}" 2>/dev/null; then
 fi
 git checkout -q --force "$XMAGE_REF"
 
-# Colosseo patches (scripts/xmage-patches): per-game random generator so that a game's seed decides its shuffles
+# Colosseum patches (scripts/xmage-patches): per-game random generator so that a game's seed decides its shuffles
 for PATCH in "$ROOT"/scripts/xmage-patches/*.patch; do
     [ -e "$PATCH" ] || continue
     echo ">> applying $(basename "$PATCH")"

@@ -1,4 +1,4 @@
-# Colosseo protocol
+# Colosseum protocol
 
 Everything a client needs to create games, play a seat or spectate. Humans (web UI) and agents use exactly the
 same messages. All payloads are JSON.
@@ -21,7 +21,7 @@ same messages. All payloads are JSON.
 | `GET /api/leaderboard` | Elo over rated games by `agent_id`: `{"rated_games", "ratings": [{"agent_id", "rating", "games", "wins", "losses", "draws", "unfinished", "fallbacks", "forfeits"}]}` |
 
 Credentials (seat token, owner token, API key) are sent as `Authorization: Bearer <secret>`, an
-`X-Colosseo-Token` header or a `token` query parameter. Browsers must send `POST`s from the server's own
+`X-Colosseum-Token` header or a `token` query parameter. Browsers must send `POST`s from the server's own
 origin (or one allowed with `--cors-origin`); `POST /api/games` requires `Content-Type: application/json`.
 Status codes: `401` API key missing/wrong, `403` token missing/wrong or cross-site request, `404` unknown
 game, `415` not JSON, `429` too many running games (`--max-games`).
@@ -119,7 +119,7 @@ creator watch with both hands visible and stop the game. Keep both private.
 
 A game created with `"require_tokens": true` follows the `tokens` rules on an open server (useful for
 benchmarks: an agent can neither take over nor peek at the other seat). Independently, a server started with
-`--api-key KEY` (or `COLOSSEO_API_KEY`) only lets key holders create games. An open server bound to
+`--api-key KEY` (or `COLOSSEUM_API_KEY`) only lets key holders create games. An open server bound to
 loopback rejects requests whose `Host` is not a loopback name (DNS rebinding); every server rejects
 cross-origin browser requests and WebSocket connections unless allowed with `--cors-origin`.
 

@@ -52,6 +52,6 @@ report's evidence folder (`projects/mtg-player/reports/2026-10-07-fra-1-evidence
 - **Balance**: 45-pairing round robin (XMage skill 3 vs itself, 20 games per pairing, starting seat swapped
   every game), 900 games, none unfinished. Overall win rates run from 42.2% to 63.9%; the most lopsided
   pairing is 15-5 (75%). Table in `round-robin-table.txt`.
-- **Human play**: one scripted-human browser game (`adapters/colosseo/sandbox/human_browser.py` from
+- **Human play**: one scripted-human browser game (`adapters/colosseum/sandbox/human_browser.py` from
   mtg-player), `fra:wg-kwia` (human seat) vs `fra:rg-aerid` (XMage AI), ran end to end and finished with no
   script errors; the lobby lists all ten FRA decks.

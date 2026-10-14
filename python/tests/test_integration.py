@@ -1,17 +1,17 @@
 """End-to-end tests against a running server (skipped when none is reachable)."""
 import pytest
 
-from colosseo import ColosseoClient, ColosseoEnv, run_game, run_match
-from colosseo.agents import HeuristicAgent, RandomAgent
+from colosseum import ColosseumClient, ColosseumEnv, run_game, run_match
+from colosseum.agents import HeuristicAgent, RandomAgent
 
 from .conftest import DECKS, DIALOG_DECK, SERVER, server_up
 
 pytestmark = [pytest.mark.integration,
-              pytest.mark.skipif(not server_up(), reason=f"no Colosseo server at {SERVER}")]
+              pytest.mark.skipif(not server_up(), reason=f"no Colosseum server at {SERVER}")]
 
 
 def test_decks_listed():
-    decks = ColosseoClient(SERVER).decks()
+    decks = ColosseumClient(SERVER).decks()
     assert any(d["id"].startswith("fdn:") for d in decks)
 
 
@@ -29,7 +29,7 @@ def test_dialog_heavy_deck_survives_random_play():
 
 
 def test_env_loop_against_xmage():
-    env = ColosseoEnv("fdn:gruul-stompers", opponent="xmage:1", opponent_deck="fdn:azorius-skies",
+    env = ColosseumEnv("fdn:gruul-stompers", opponent="xmage:1", opponent_deck="fdn:azorius-skies",
                       server=SERVER, max_turns=12, record=False)
     agent = HeuristicAgent()
     d = env.reset()
@@ -42,9 +42,9 @@ def test_env_loop_against_xmage():
 
 
 def test_illegal_action_is_rejected():
-    env = ColosseoEnv("fdn:gruul-stompers", opponent="xmage:1", server=SERVER, max_turns=5, record=False)
+    env = ColosseumEnv("fdn:gruul-stompers", opponent="xmage:1", server=SERVER, max_turns=5, record=False)
     d = env.reset()
-    from colosseo import Action
+    from colosseum import Action
     d2, _, _, info = env.step(Action({"choice": "not-an-option"}))
     assert info.get("rejected") and d2.id == d.id
     env.close()
@@ -66,8 +66,8 @@ def test_explanations_reach_browser_seats_only():
     """`explain` (printed vs current power/toughness, effects) is for the web UI: a seat of type human gets it,
     an agent's observation never does."""
     import threading
-    from colosseo import play
-    client = ColosseoClient(SERVER)
+    from colosseum import play
+    client = ColosseumClient(SERVER)
     game = client.create_game([{"type": "human", "deck": "fdn:gruul-stompers", "stop_policy": "all"},
                                {"type": "agent", "deck": "fdn:selesnya-pack"}],
                               seed=7, max_turns=8, record=False)
@@ -90,7 +90,7 @@ def _trace(game_id, tokens):
     since its previous decision), with object ids replaced by their labels, and the game's result."""
     import re
     import threading
-    from colosseo import play
+    from colosseum import play
     uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
     short = re.compile(r"\[[0-9a-f]{3}\]")  # log lines name objects by an id prefix, which differs between games
 
@@ -137,7 +137,7 @@ def _trace(game_id, tokens):
         t.start()
     for t in threads:
         t.join(600)
-    result = ColosseoClient(SERVER).game(game_id)["result"]
+    result = ColosseumClient(SERVER).game(game_id)["result"]
     lives = [p["life"] for p in result["players"]]
     return [a.trace for a in agents], [a.explained for a in agents], {**{k: result.get(k) for k in ("status", "reason", "winner_seat", "turns", "decisions")}, "life": lives}
 
@@ -180,7 +180,7 @@ def test_explanations_do_not_change_play(seed):
     deck = ["fdn:gruul-stompers", "fdn:selesnya-pack"]
     runs = []
     for seat_type, spectators in (("agent", 0), ("human", 2)):
-        game = ColosseoClient(SERVER).create_game(
+        game = ColosseumClient(SERVER).create_game(
             # names and the seat options human and agent seats default differently, set alike
             [{"type": seat_type, "name": f"P{s}", "deck": deck[s], "stop_policy": "all", "auto_pass": True, "auto_pay": True,
               "yield_after_cast": False, "mulligan_keep_first": True} for s in (0, 1)],
@@ -237,8 +237,8 @@ class _Mulligans(HeuristicAgent):
 
 def _two_mulligans(seat_type):
     import threading
-    from colosseo import play
-    game = ColosseoClient(SERVER).create_game([{"type": seat_type, "deck": "fdn:azorius-skies", "stop_policy": "all"},
+    from colosseum import play
+    game = ColosseumClient(SERVER).create_game([{"type": seat_type, "deck": "fdn:azorius-skies", "stop_policy": "all"},
                                                {"type": "xmage", "deck": "fdn:gruul-stompers"}],
                                               seed=2026, starting_seat=0, max_turns=1, record=False)
     agent = _Mulligans(2)
@@ -295,8 +295,8 @@ def test_event_feed_reaches_browser_views_only():
     page can show an opponent's spell and its targets even when the seat can't respond; agents never get any. A
     card the view can't see moving (the opponent drawing) comes without its id."""
     import threading
-    from colosseo import play
-    game = ColosseoClient(SERVER).create_game([{"type": "human", "deck": "fdn:gruul-stompers", "stop_policy": "all"},
+    from colosseum import play
+    game = ColosseumClient(SERVER).create_game([{"type": "human", "deck": "fdn:gruul-stompers", "stop_policy": "all"},
                                                {"type": "agent", "deck": "fdn:selesnya-pack"}],
                                               seed=7, starting_seat=0, max_turns=8, record=False)
     tokens = {s["seat"]: s.get("token") for s in game["seats"]}
@@ -385,8 +385,8 @@ def _target(d, name):
 
 def _scripted_game(decks, rules, seed, turns):
     import threading
-    from colosseo import play
-    game = ColosseoClient(SERVER).create_game([{"type": "human", "name": "Human", "deck": decks[0], "stop_policy": "all"},
+    from colosseum import play
+    game = ColosseumClient(SERVER).create_game([{"type": "human", "name": "Human", "deck": decks[0], "stop_policy": "all"},
                                                {"type": "agent", "name": "Opp", "deck": decks[1], "stop_policy": "all"}],
                                               seed=seed, starting_seat=0, max_turns=turns, turn_limit_result="void",
                                               record=False)

@@ -1,4 +1,4 @@
-from colosseo import Action, Decision, render_decision, render_state
+from colosseum import Action, Decision, render_decision, render_state
 
 
 def test_decision_basics(decisions):

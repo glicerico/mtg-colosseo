@@ -31,7 +31,7 @@ const STEP_MS = { cast: 1300, trigger: 1100, ability: 1100, attack: 1000, block:
   move: 700, leave: 800, draw: 350, reveal: 1100 };
 const PACES = { slow: 1.6, normal: 1, fast: 0.5, off: 0 };
 const PACE_NAMES = { slow: 'Slow', normal: 'Normal', fast: 'Fast', off: 'Off' };
-const PACE_KEY = 'colosseo.pace';
+const PACE_KEY = 'colosseum.pace';
 const OWN_K = 0.35;
 const LAG_MS = 5000;
 const MIN_STEP_MS = 250;
@@ -183,7 +183,7 @@ export class GameView {
     this.log = [];
     this.cache = new Map();
     this.local = { attackers: new Map(), blocks: new Map(), blocker: null };
-    this.reveal = localStorage.getItem('colosseo.reveal') === '1';
+    this.reveal = localStorage.getItem('colosseum.reveal') === '1';
     this.mayReveal = true; // until the server says otherwise
     this.waiting = null; // spectator: {seat, kind, prompt}
     this.lastError = null;
@@ -474,7 +474,7 @@ export class GameView {
       const rev = h('input', { type: 'checkbox', checked: this.reveal && this.mayReveal, disabled: !this.mayReveal });
       rev.addEventListener('change', () => {
         this.reveal = rev.checked;
-        localStorage.setItem('colosseo.reveal', this.reveal ? '1' : '0');
+        localStorage.setItem('colosseum.reveal', this.reveal ? '1' : '0');
         this.send({ type: 'settings', reveal: this.reveal }); // the server answers with the matching view
       });
       controls.push(h('label', {
@@ -534,7 +534,7 @@ export class GameView {
           this.el.banner.replaceChildren(
             h('b', {}, 'Waiting for an agent to take seat ' + other.seat + '. '),
             'Connect one with the Python SDK:',
-            h('pre', {}, `python -c "from colosseo import play; from colosseo.agents import HeuristicAgent; ` +
+            h('pre', {}, `python -c "from colosseum import play; from colosseum.agents import HeuristicAgent; ` +
               `play(HeuristicAgent(), '${this.gameId}', ${other.seat}, '${location.origin}'${token ? `, token='${token}'` : ''})"`),
             token ? null : h('div', { class: 'muted' }, 'This browser does not hold the seat token; on a protected game ask the game’s creator for it.'));
         }
